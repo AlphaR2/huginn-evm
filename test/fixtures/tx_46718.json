@@ -1,0 +1,18 @@
+{
+  "source": "getTransaction (RPC), for cross-checking the shred parser",
+  "signature_base58": "4F39ig6uWUKU8cAcUYwyCeTasG5U6KgZLoYcbkabhVsbJo3pLWMGkQjsUfUMKDrm7P9HkZrjoFzpRjmAc1YJ8dL",
+  "signature": "02cbb92302df4d2de364e7a5087f5e61c5279210cfd2548dec0652fe3d0980b9f3d913375d436aad95250f30d4d65b439fb9baa82539445706f3a8a9fe0b670f",
+  "slot": 46718,
+  "version": "legacy",
+  "err": null,
+  "raw": "0102cbb92302df4d2de364e7a5087f5e61c5279210cfd2548dec0652fe3d0980b9f3d913375d436aad95250f30d4d65b439fb9baa82539445706f3a8a9fe0b670f01000204a120a7e1071a6c25ef5343be2497144cb7fca9e4b8a28c0ee266709a6c6a851662b02bc726ffe93717028aeeeb9ef6963be8f3f5f3e7aedfe15852800d92d7880000000000000000000000000000000000000000000000000000000000000000054a53522854cdd103cc2e4631a3f51792ac727cf1e50abc97828ac5994f3cc2c60f08a9df62aac45aebfc9c3433d5b13197086ccc50898e5fd78c89d2daf4ae02020200010c020000000065cd1d00000000030019687567696e6e3a2068656c6c6f2066726f6d20736f6c616e61",
+  "log_messages": [
+    "Program 11111111111111111111111111111111 invoke [1]",
+    "Program 11111111111111111111111111111111 success",
+    "Program Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH invoke [1]",
+    "Program log: Memo (len 25)",
+    "Program log: huginn: hello from solana",
+    "Program Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH consumed 287 of 202850 compute units",
+    "Program Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH success"
+  ]
+}

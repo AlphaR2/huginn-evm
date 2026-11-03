@@ -1,0 +1,8 @@
+out/
+cache/
+broadcast/
+lib/
+relayer/target/
+proofs/*
+!proofs/.gitkeep
+.env
