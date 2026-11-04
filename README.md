@@ -67,6 +67,7 @@ script/Submit.s.sol         submit proofs/proof.json
 script/DeployGreeter.s.sol  deploy SolanaGreeter for a Solana key
 test/                       Foundry tests on the real proven memo transfer from huginn's local chain
 docs/demo.md                the demo, step by step, with what you should see
+docs/codebase.md            every file explained, in reading order
 .env.example                every setting, explained
 ```
 

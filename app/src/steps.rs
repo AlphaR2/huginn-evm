@@ -602,7 +602,7 @@ impl Runner {
         let dir = self.settings.evm_dir.clone();
         let out = self.forge(id, "script/Submit.s.sol", &rpc, &dir, &env).await?;
         ensure!(out.contains("verified Solana slot"), "the contract did not confirm the slot");
-        let gas = self.chain_id_for_broadcast().await.and_then(|chain| last_gas(&dir, "Submit.s.sol", chain));
+        let gas = self.state.chain_id.and_then(|chain| last_gas(&dir, "Submit.s.sol", chain));
         self.state.submit_gas = gas;
         Ok(format!("accepted{}", gas.map(|g| format!(", {g} gas")).unwrap_or_default()))
     }
@@ -743,10 +743,6 @@ impl Runner {
 
     fn ledger_dump(&self) -> PathBuf {
         self.settings.huginn_dir.join("target/release/ledger-dump")
-    }
-
-    async fn chain_id_for_broadcast(&self) -> Option<u64> {
-        self.state.chain_id
     }
 
     async fn rpc(&self, method: &str, params: &str) -> Result<serde_json::Value> {
