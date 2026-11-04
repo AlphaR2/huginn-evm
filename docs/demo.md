@@ -38,7 +38,9 @@ Make the terminal at least 150 × 34 characters.
 
 ## The run (mock proofs, ~10 s)
 
-Press `e` and type a memo, e.g. `gm from solana`, then `enter`. Press `enter` again to run everything. What each step shows:
+Press `e`, type a message (e.g. `gm from solana`), then `enter` to save it. Press `enter` again to start. The four stages fill in, and the card underneath tells the story in plain sentences. At the end it says whether the contract trusts your message.
+
+To show what's under the hood, press `d` at any time: every step, the exact command it ran, and its output. What each step shows there:
 
 | # | Step | What you should see |
 |---|---|---|
@@ -55,10 +57,12 @@ Press `e` and type a memo, e.g. `gm from solana`, then `enter`. Press `enter` ag
 | 11 | Run the Solana command | the same proof handed to `SolanaGreeter.execute`; greeting becomes your memo |
 | 12 | Forged proof rejected | the real output is accepted; the memo with one character changed gets `rejected: InvalidProof` |
 
-The three boxes at the top fill in as you go:
+In the details view, the three boxes at the top fill in as you go:
 - **Solana:** tx, slot, finalized, memo;
 - **proof:** mode, cycles, time, program key;
 - **EVM:** client, gas, verified, greeting.
+
+`d` (or `esc`) goes back.
 
 ## Talking points
 
@@ -68,7 +72,7 @@ The three boxes at the top fill in as you go:
   - the block_id rebuilt from the shreds;
   - the transaction's bytes inside the block.
 - **No special infrastructure.** The certificate that finalized block N is inside block N+1's footer. So the shreds are all Huginn needs: no plugin and no paid feed.
-- **Mock vs real.** In mock mode SP1 runs the same program but makes no proof. Press `m` for `compressed`: a real STARK proof, ~5 minutes on a laptop. Real chains take `groth16`: ~260 bytes, ~270k gas to verify on Base.
+- **Practice vs real.** A practice proof runs the same program in SP1 but makes no proof. Press `m` for `real (STARK)`, ~5 minutes on a laptop. Real chains take `real (Groth16)`: ~260 bytes, ~270k gas to verify on Base.
 - **A Solana wallet controls an EVM contract.** `SolanaGreeter` acts only on transactions your Solana key signed. The memo names the chain and the contract (`huginn:31337:greeter:…`), so it can't be replayed elsewhere, and each transaction runs once.
 - **Inclusion is not success.** A failed Solana transaction is in its block too. Step 3 says if it failed; the contract sees the raw transaction.
 - **Today's trust gap.** The client's owner stores each epoch's validator set hash. Proving the set handover from one epoch to the next is planned.

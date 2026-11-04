@@ -1,5 +1,7 @@
-//! The Huginn TUI: the flow's steps on the left, the selected step's explanation and live
-//! log on the right, what the flow has proven so far across the top.
+//! The Huginn TUI. Two views of the same run:
+//!   - guided (default): your message, four stages (send, finalize, prove, verify), and
+//!     plain sentences of what is happening and what happened;
+//!   - details (`d`): every step with the exact command it ran and its output.
 
 use {
     crate::steps::{Event, ProofMode, Runner, Settings, Side, State, StepId},
@@ -43,7 +45,25 @@ struct StepView {
     log: Vec<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Guided,
+    Details,
+}
+
+/// The four stages the guided view shows, and the steps each one covers.
+const STAGES: [(&str, &[StepId]); 4] = [
+    ("Send", &[StepId::Doctor, StepId::Send]),
+    ("Finalize", &[StepId::Finalize, StepId::Fetch]),
+    ("Prove", &[StepId::Prove]),
+    ("Verify", &[StepId::Anvil, StepId::Deploy, StepId::Submit, StepId::Check, StepId::Greeter, StepId::Command, StepId::Forged]),
+];
+
 struct App {
+    view: View,
+    help: bool,
+    run_started: Option<Instant>,
+    run_took: Option<Duration>,
     steps: Vec<StepView>,
     list: ListState,
     state: State,
@@ -90,6 +110,10 @@ pub fn run(settings: Settings) -> Result<()> {
 impl App {
     fn new(settings: Settings) -> App {
         App {
+            view: View::Guided,
+            help: false,
+            run_started: None,
+            run_took: None,
             steps: StepId::ALL.into_iter().map(|id| StepView { id, status: Status::Pending, log: Vec::new() }).collect(),
             list: ListState::default().with_selected(Some(0)),
             state: State::default(),
@@ -126,7 +150,10 @@ impl App {
                 };
             }
             Event::State(s) => self.state = *s,
-            Event::Finished => self.busy = false,
+            Event::Finished => {
+                self.busy = false;
+                self.run_took = self.run_started.map(|t| t.elapsed());
+            }
         }
     }
 
@@ -136,6 +163,8 @@ impl App {
             return;
         }
         self.busy = true;
+        self.run_started = Some(Instant::now());
+        self.run_took = None;
         for id in &ids {
             self.steps[index(*id)].status = Status::Pending;
         }
@@ -173,9 +202,33 @@ impl App {
             }
             return;
         }
+        if self.help {
+            self.help = false;
+            return;
+        }
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc if self.view == View::Details => self.view = View::Guided,
+            KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
+            KeyCode::Char('d') | KeyCode::Tab => {
+                self.view = if self.view == View::Guided { View::Details } else { View::Guided };
+            }
+            KeyCode::Char('?') => self.help = true,
+            // The guided view only starts, edits and changes settings.
+            _ if self.view == View::Guided => match code {
+                KeyCode::Enter if !self.busy => {
+                    for s in &mut self.steps {
+                        s.status = Status::Pending;
+                        s.log.clear();
+                    }
+                    self.start(StepId::ALL.to_vec(), rt, runner);
+                }
+                KeyCode::Char('e') if !self.busy => self.editing = Some(String::new()),
+                KeyCode::Char('m') if !self.busy => self.settings.mode = self.settings.mode.next(),
+                KeyCode::Char('s') if !self.busy => self.settings.certs = self.settings.certs.next(),
+                _ => {}
+            },
             KeyCode::Down | KeyCode::Char('j') => {
                 self.list.select(Some((self.selected() + 1).min(self.steps.len() - 1)));
                 self.scroll = 0;
@@ -219,6 +272,16 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        match self.view {
+            View::Guided => self.draw_guided(f),
+            View::Details => self.draw_details(f),
+        }
+        if self.help {
+            self.draw_help(f);
+        }
+    }
+
+    fn draw_details(&mut self, f: &mut Frame) {
         let [header, flow, body, settings, keys] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(6),
@@ -412,7 +475,7 @@ impl App {
         let keys: &[(&str, &str)] = if self.editing.is_some() {
             &[("enter", "save memo"), ("esc", "cancel")]
         } else {
-            &[("enter", "run all"), ("r", "run step"), ("n", "run from here"), ("m", "proof mode"), ("s", "cert source"), ("e", "edit memo"), ("↑↓", "select"), ("J/K", "scroll log"), ("q", "quit")]
+            &[("d", "back to guided"), ("enter", "run all"), ("r", "run step"), ("n", "run from here"), ("↑↓", "select"), ("J/K", "scroll log"), ("q", "quit")]
         };
         let mut spans = vec![Span::raw(" ")];
         for (k, v) in keys {
@@ -421,6 +484,323 @@ impl App {
         }
         f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Left), area);
     }
+}
+
+// ---- guided view ----------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageStatus {
+    Pending,
+    Running,
+    Ok,
+    Failed,
+}
+
+impl App {
+    fn step(&self, id: StepId) -> &StepView {
+        &self.steps[index(id)]
+    }
+
+    fn stage_status(&self, steps: &[StepId]) -> StageStatus {
+        let st: Vec<&Status> = steps.iter().map(|id| &self.step(*id).status).collect();
+        if st.iter().any(|s| matches!(s, Status::Failed(..))) {
+            StageStatus::Failed
+        } else if st.iter().all(|s| matches!(s, Status::Ok(..))) {
+            StageStatus::Ok
+        } else if st.iter().any(|s| matches!(s, Status::Running(_))) || (self.busy && st.iter().any(|s| matches!(s, Status::Ok(..)))) {
+            StageStatus::Running
+        } else {
+            StageStatus::Pending
+        }
+    }
+
+    fn stage_note(&self, stage: usize) -> String {
+        let s = &self.state;
+        match (stage, self.stage_status(STAGES[stage].1)) {
+            (_, StageStatus::Failed) => "stopped".into(),
+            (_, StageStatus::Pending) => String::new(),
+            (_, StageStatus::Running) => "…".into(),
+            (0, StageStatus::Ok) => "sent".into(),
+            (1, StageStatus::Ok) => s.slot.map(|x| format!("slot {x}")).unwrap_or_default(),
+            (2, StageStatus::Ok) => match (s.proof_mode, s.prove_secs) {
+                (Some(m), Some(t)) => format!("{}, {}", mode_name(m), fmt_dur(Duration::from_secs_f64(t))),
+                _ => "done".into(),
+            },
+            (3, StageStatus::Ok) => "trusted".into(),
+            _ => String::new(),
+        }
+    }
+
+    fn draw_guided(&self, f: &mut Frame) {
+        let full = f.area();
+        // A calm, centered column.
+        let width = full.width.min(92);
+        let area = Rect { x: full.x + (full.width - width) / 2, width, ..full };
+        let [_, title, _, message, _, stages, notes, _, card, footer, _] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(17),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" HUGINN ", Style::new().fg(Color::Black).bg(ACCENT).bold()),
+                Span::styled("  prove a Solana message on an EVM chain", Style::new().fg(Color::Gray)),
+            ])),
+            title,
+        );
+
+        let msg = match &self.editing {
+            Some(t) => vec![
+                Span::styled("  Your message   ", Style::new().fg(DIM)),
+                Span::styled(format!("{t}▏"), Style::new().fg(Color::White).bold()),
+                Span::styled("   enter to save, esc to cancel", Style::new().fg(DIM)),
+            ],
+            None => vec![Span::styled("  Your message   ", Style::new().fg(DIM)), Span::styled(self.settings.memo.clone(), Style::new().fg(Color::White).bold())],
+        };
+        f.render_widget(Paragraph::new(Line::from(msg)), message);
+
+        // ✓ Send ────── ✓ Finalize ────── ⠋ Prove ────── ○ Verify
+        let cols = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(stages);
+        let note_cols = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(notes);
+        for (i, (name, steps)) in STAGES.iter().enumerate() {
+            let (icon, style) = match self.stage_status(steps) {
+                StageStatus::Pending => ("○".to_string(), Style::new().fg(DIM)),
+                StageStatus::Running => (SPINNER[self.tick % SPINNER.len()].to_string(), Style::new().fg(Color::Yellow).bold()),
+                StageStatus::Ok => ("✓".to_string(), Style::new().fg(OK).bold()),
+                StageStatus::Failed => ("✗".to_string(), Style::new().fg(BAD).bold()),
+            };
+            let line = Line::from(vec![Span::raw("  "), Span::styled(format!("{icon} {name}"), style), Span::styled(if i < 3 { " ─────" } else { "" }, Style::new().fg(DIM))]);
+            f.render_widget(Paragraph::new(line), cols[i]);
+            f.render_widget(Paragraph::new(Line::styled(format!("    {}", self.stage_note(i)), Style::new().fg(DIM))), note_cols[i]);
+        }
+
+        self.draw_card(f, card);
+
+        let keys: &[(&str, &str)] = if self.editing.is_some() {
+            &[]
+        } else if self.busy {
+            &[("d", "see the details"), ("q", "quit")]
+        } else if self.steps.iter().any(|s| !matches!(s.status, Status::Pending)) {
+            &[("enter", "run again"), ("e", "new message"), ("d", "details"), ("?", "help"), ("q", "quit")]
+        } else {
+            &[("enter", "start"), ("e", "edit message"), ("d", "details"), ("?", "help"), ("q", "quit")]
+        };
+        let mut spans = vec![Span::raw("  ")];
+        for (k, v) in keys {
+            spans.push(Span::styled(*k, Style::new().fg(Color::White).bold()));
+            spans.push(Span::styled(format!(" {v}    "), Style::new().fg(DIM)));
+        }
+        let mode = Line::from(vec![
+            Span::styled(format!("  {} proof", mode_name(self.settings.mode)), Style::new().fg(DIM)),
+            Span::styled("  (m to change)", Style::new().fg(Color::Rgb(70, 70, 70))),
+        ]);
+        f.render_widget(Paragraph::new(vec![Line::from(spans), mode]), footer);
+    }
+
+    fn draw_card(&self, f: &mut Frame, area: Rect) {
+        let failed = self.steps.iter().find(|s| matches!(s.status, Status::Failed(..)));
+        let any_run = self.steps.iter().any(|s| !matches!(s.status, Status::Pending));
+        let all_ok = self.steps.iter().all(|s| matches!(s.status, Status::Ok(..)));
+        let mut lines: Vec<Line> = Vec::new();
+        let border;
+
+        if !any_run {
+            border = DIM;
+            lines.push(Line::raw(""));
+            lines.push(Line::raw("  Huginn shows another blockchain that something really happened on Solana,"));
+            lines.push(Line::raw("  using only the signatures of Solana's own validators."));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  Press enter and your message will:", Style::new().fg(Color::Gray)));
+            for (n, t) in [
+                "be sent on Solana",
+                "be finalized by Solana's validators",
+                "become a zero-knowledge proof",
+                "be checked by a contract on an EVM chain",
+                "change a contract that only your Solana wallet controls",
+            ]
+            .iter()
+            .enumerate()
+            {
+                lines.push(Line::from(vec![Span::styled(format!("    {}  ", n + 1), Style::new().fg(ACCENT)), Span::raw(*t)]));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(format!("  {}", time_hint(self.settings.mode)), Style::new().fg(DIM)));
+        } else {
+            // The story so far, in plain sentences.
+            for s in &self.steps {
+                match &s.status {
+                    Status::Ok(..) => lines.push(Line::from(vec![Span::styled("  ✓ ", Style::new().fg(OK)), Span::raw(done_text(s.id, &self.state, &self.settings))])),
+                    Status::Running(t) => lines.push(Line::from(vec![
+                        Span::styled(format!("  {} ", SPINNER[self.tick % SPINNER.len()]), Style::new().fg(Color::Yellow)),
+                        Span::styled(doing_text(s.id), Style::new().fg(Color::White).bold()),
+                        Span::styled(format!("  {}", fmt_dur(t.elapsed())), Style::new().fg(DIM)),
+                    ])),
+                    Status::Failed(..) => lines.push(Line::from(vec![Span::styled("  ✗ ", Style::new().fg(BAD)), Span::styled(doing_text(s.id).trim_end_matches('…').to_string(), Style::new().fg(BAD))])),
+                    Status::Pending => {}
+                }
+                if s.id == StepId::Prove && matches!(s.status, Status::Running(_)) {
+                    lines.push(Line::styled(format!("    {}", prove_hint(self.settings.mode)), Style::new().fg(DIM)));
+                }
+            }
+            if let Some(s) = failed {
+                border = BAD;
+                lines.push(Line::raw(""));
+                lines.extend(failure_help(s).into_iter().map(|l| Line::styled(format!("  {l}"), Style::new().fg(Color::Gray))));
+            } else if all_ok && !self.busy {
+                border = OK;
+                lines.push(Line::raw(""));
+                let took = self.run_took.map(|d| format!(" in {}", fmt_dur(d))).unwrap_or_default();
+                lines.push(Line::styled(format!("  Done{took}. A contract on {} trusts your Solana message.", chain_name(self.state.chain_id)), Style::new().fg(OK).bold()));
+                if self.settings.mode == ProofMode::Mock || self.state.proof_mode == Some(ProofMode::Mock) {
+                    lines.push(Line::styled("  Practice proof: every check ran, but no real proof was made. Press m for a real one.", Style::new().fg(DIM)));
+                }
+            } else {
+                border = Color::Yellow;
+            }
+        }
+        let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(border));
+        f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+    }
+
+    fn draw_help(&self, f: &mut Frame) {
+        let full = f.area();
+        let (w, h) = (86.min(full.width), 17.min(full.height));
+        let area = Rect { x: full.x + (full.width - w) / 2, y: full.y + (full.height - h) / 2, width: w, height: h };
+        let k = |key: &str, text: &str| Line::from(vec![Span::styled(format!("  {key:<7}"), Style::new().fg(Color::White).bold()), Span::styled(text.to_string(), Style::new().fg(Color::Gray))]);
+        let lines = vec![
+            Line::raw(""),
+            k("enter", "send your message and run everything"),
+            k("e", "write a new message"),
+            k("d", "details: every step, the exact command it ran, and its output"),
+            k("q", "quit"),
+            Line::raw(""),
+            Line::styled("  Settings", Style::new().fg(ACCENT).bold()),
+            k("m", &format!("proof: {}", mode_name(self.settings.mode))),
+            Line::styled("         practice: seconds; SP1 runs every check but makes no real proof", Style::new().fg(DIM)),
+            Line::styled("         real (STARK): ~5 minutes on a laptop", Style::new().fg(DIM)),
+            Line::styled("         real (Groth16): what real chains take; needs Docker + SP1_VERIFIER", Style::new().fg(DIM)),
+            k("s", &format!("validators' signatures from: {}", match self.settings.certs {
+                crate::steps::CertSource::Shreds => "the next block (no plugin needed)",
+                crate::steps::CertSource::Plugin => "the footer-dump plugin",
+            })),
+            Line::raw(""),
+            Line::styled("  any key closes this", Style::new().fg(DIM)),
+        ];
+        f.render_widget(ratatui::widgets::Clear, area);
+        let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(" help ");
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+}
+
+fn mode_name(m: ProofMode) -> &'static str {
+    match m {
+        ProofMode::Mock => "practice",
+        ProofMode::Compressed => "real (STARK)",
+        ProofMode::Groth16 => "real (Groth16)",
+    }
+}
+
+fn time_hint(m: ProofMode) -> &'static str {
+    match m {
+        ProofMode::Mock => "Takes about 10 seconds with a practice proof (press m for a real one).",
+        ProofMode::Compressed => "Takes about 5 minutes: the real proof is the slow part.",
+        ProofMode::Groth16 => "Takes 10+ minutes: the real Groth16 proof is the slow part.",
+    }
+}
+
+fn prove_hint(m: ProofMode) -> &'static str {
+    match m {
+        ProofMode::Mock => "practice proof: a few seconds",
+        ProofMode::Compressed => "a real proof: usually about 5 minutes. Your laptop's fans may spin up.",
+        ProofMode::Groth16 => "a real Groth16 proof: usually 10+ minutes, part of it in Docker.",
+    }
+}
+
+fn chain_name(id: Option<u64>) -> String {
+    match id {
+        Some(31337) | None => "your local EVM chain".into(),
+        Some(84532) => "Base Sepolia".into(),
+        Some(8453) => "Base".into(),
+        Some(id) => format!("chain {id}"),
+    }
+}
+
+/// What a step is doing, in plain words.
+fn doing_text(id: StepId) -> &'static str {
+    match id {
+        StepId::Doctor => "Checking your setup…",
+        StepId::Send => "Sending your message on Solana…",
+        StepId::Finalize => "Waiting for Solana's validators to finalize it…",
+        StepId::Fetch => "Collecting the block and the validators' signatures…",
+        StepId::Prove => "Making a zero-knowledge proof that your message is in a finalized block…",
+        StepId::Anvil => "Starting a local EVM chain…",
+        StepId::Deploy => "Deploying the Huginn contract…",
+        StepId::Submit => "Sending the proof to the contract…",
+        StepId::Check => "Asking the contract whether it trusts your message…",
+        StepId::Greeter => "Deploying a contract that only your Solana wallet controls…",
+        StepId::Command => "Using your message to change that contract…",
+        StepId::Forged => "Trying a forged copy of your message…",
+    }
+}
+
+/// What a step did, in plain words.
+fn done_text(id: StepId, s: &State, settings: &Settings) -> String {
+    match id {
+        StepId::Doctor => "Your setup is ready".into(),
+        StepId::Send => "Sent your message on Solana".into(),
+        StepId::Finalize => match (s.slot, s.tx_ok) {
+            (Some(slot), Some(false)) => format!("Finalized in slot {slot} (the transaction itself failed, but it is in the block)"),
+            (Some(slot), _) => format!("Solana's validators finalized it in slot {slot}"),
+            _ => "Solana's validators finalized it".into(),
+        },
+        StepId::Fetch => "Collected the block and the validators' signatures, and checked them".into(),
+        StepId::Prove => match s.proof_mode {
+            Some(ProofMode::Mock) => "SP1 checked the signatures and found your message (practice proof)".into(),
+            _ => format!("Made a real zero-knowledge proof{}", s.cycles.map(|c| format!(" ({} computation steps)", fmt_cycles(c))).unwrap_or_default()),
+        },
+        StepId::Anvil => format!("Using {}", chain_name(s.chain_id)),
+        StepId::Deploy => "Deployed the Huginn contract".into(),
+        StepId::Submit => "The contract checked the proof and accepted it".into(),
+        StepId::Check => "The contract now says your message is verified".into(),
+        StepId::Greeter => "Deployed a contract only your Solana wallet controls".into(),
+        StepId::Command => format!("Your message changed it: it now says \"{}\"", s.greeting.clone().unwrap_or_else(|| settings.memo.clone())),
+        StepId::Forged => "A forged copy of your message was rejected".into(),
+    }
+}
+
+/// What went wrong and what to do, in plain words.
+fn failure_help(s: &StepView) -> Vec<String> {
+    let Status::Failed(err, _) = &s.status else { return vec![] };
+    let mut out = Vec::new();
+    if s.id == StepId::Doctor {
+        out.push("Something Huginn needs isn't ready:".to_string());
+        let mut lines = s.log.iter().peekable();
+        while let Some(l) = lines.next() {
+            if let Some(rest) = l.strip_prefix("✗ ") {
+                out.push(format!("  • {}", rest.split_whitespace().collect::<Vec<_>>().join(" ")));
+                if let Some(next) = lines.peek() {
+                    if next.starts_with("    ") {
+                        out.push(format!("    fix: {}", next.trim()));
+                    }
+                }
+            }
+        }
+    } else {
+        out.push(format!("It stopped here: {}", err.lines().next().unwrap_or(err)));
+    }
+    out.push(String::new());
+    out.push("Press d to see exactly what happened, then enter to try again.".into());
+    out
 }
 
 fn index(id: StepId) -> usize {
@@ -514,11 +894,78 @@ mod tests {
         ];
         app.list.select(Some(11));
         let mut t = Terminal::new(TestBackend::new(150, 38)).unwrap();
+        app.view = if std::env::var("VIEW").as_deref() == Ok("details") { View::Details } else { View::Guided };
+        app.run_took = Some(Duration::from_millis(9800));
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer();
         for y in 0..buf.area.height {
             let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
             println!("{}", line.trim_end());
         }
+    }
+}
+
+#[cfg(test)]
+mod guided_tests {
+    use {super::*, ratatui::{backend::TestBackend, Terminal}};
+
+    fn render(app: &mut App, title: &str) {
+        let mut t = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        t.draw(|f| app.draw(f)).unwrap();
+        println!("===== {title} =====");
+        let buf = t.backend().buffer();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            println!("{}", line.trim_end());
+        }
+    }
+
+    fn app() -> App {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut settings = Settings::load(dir.canonicalize().unwrap(), None).unwrap();
+        settings.memo = "gm from solana".into();
+        App::new(settings)
+    }
+
+    /// `cargo test --release --offline -- --nocapture guided`
+    #[test]
+    fn guided_moments() {
+        let mut a = app();
+        render(&mut a, "before start");
+
+        let ms = |n| Duration::from_millis(n);
+        for (i, _) in StepId::ALL.iter().enumerate().take(4) {
+            a.steps[i].status = Status::Ok(String::new(), ms(500));
+        }
+        a.state.slot = Some(126768);
+        a.state.tx_ok = Some(true);
+        a.steps[4].status = Status::Running(Instant::now() - ms(2300));
+        a.settings.mode = ProofMode::Compressed;
+        a.busy = true;
+        render(&mut a, "proving");
+
+        for s in &mut a.steps {
+            s.status = Status::Ok(String::new(), ms(500));
+        }
+        a.busy = false;
+        a.settings.mode = ProofMode::Mock;
+        a.run_took = Some(ms(9800));
+        a.state.proof_mode = Some(ProofMode::Mock);
+        a.state.prove_secs = Some(0.4);
+        a.state.chain_id = Some(31337);
+        a.state.greeting = Some("gm from solana".into());
+        render(&mut a, "done");
+
+        let mut b = app();
+        b.steps[0].status = Status::Failed("missing: validator".into(), ms(300));
+        b.steps[0].log = vec![
+            "✓ solana   solana-cli 4.4.0".into(),
+            "✗ validator not reachable at http://127.0.0.1:8899".into(),
+            "    in huginn: solana-test-validator --alpenglow --ledger .local-ledger".into(),
+        ];
+        render(&mut b, "setup problem");
+
+        b.help = true;
+        render(&mut b, "help");
     }
 }

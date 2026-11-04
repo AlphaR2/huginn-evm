@@ -23,26 +23,22 @@ cd app && cargo build --release && cd ..
 ./app/target/release/huginn-evm
 ```
 
-A single screen runs the whole flow:
-1. checks your tools;
-2. sends a memo on the local Solana chain and waits for it to finalize;
-3. fetches the block's certificate and shreds;
-4. proves it with SP1;
-5. starts anvil, deploys the light client and submits the proof;
-6. asks the contract `isVerified`;
-7. deploys a contract your Solana key controls, and runs your memo as its command;
-8. shows that a forged proof is rejected.
+Type a message, press enter, and watch it travel through four stages:
 
-Each step shows the exact command it ran and that command's output.
+```
+✓ Send ───── ✓ Finalize ───── ⠋ Prove ───── ○ Verify
+```
+
+Underneath, plain sentences say what's happening and what happened. A result card at the end says whether the contract trusts your message.
 
 | Key | Does |
 |---|---|
-| `enter` | run every step |
-| `r` / `n` | run the selected step / from it to the end |
-| `m` | proof mode: `mock` (seconds), `compressed` (real STARK, ~5 min), `groth16` (real, for real chains) |
-| `s` | certificate source: `shreds` (the next block's footer; no plugin needed) or `plugin` (footer-dump) |
-| `e` | edit the memo |
-| `↑↓`, `J/K` | select a step, scroll its log |
+| `enter` | send your message and run everything |
+| `e` | write a new message |
+| `d` | details: every step, the exact command it ran, and its output (`enter`/`r`/`n` run steps from there) |
+| `?` | help, including the two settings: |
+| `m` | proof: `practice` (seconds, no real proof), `real (STARK)` (~5 min), `real (Groth16)` (for real chains) |
+| `s` | where the validators' signatures come from: the next block's shreds (default, no plugin), or the footer-dump plugin |
 
 The same steps run without the TUI (scripts, CI):
 
