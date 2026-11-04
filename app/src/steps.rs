@@ -34,6 +34,8 @@ pub enum StepId {
     Deploy,
     Submit,
     Check,
+    Greeter,
+    Command,
     Forged,
 }
 
@@ -46,7 +48,7 @@ pub enum Side {
 }
 
 impl StepId {
-    pub const ALL: [StepId; 10] = [
+    pub const ALL: [StepId; 12] = [
         StepId::Doctor,
         StepId::Send,
         StepId::Finalize,
@@ -56,6 +58,8 @@ impl StepId {
         StepId::Deploy,
         StepId::Submit,
         StepId::Check,
+        StepId::Greeter,
+        StepId::Command,
         StepId::Forged,
     ];
 
@@ -70,6 +74,8 @@ impl StepId {
             StepId::Deploy => "deploy",
             StepId::Submit => "submit",
             StepId::Check => "check",
+            StepId::Greeter => "greeter",
+            StepId::Command => "command",
             StepId::Forged => "forged",
         }
     }
@@ -89,6 +95,8 @@ impl StepId {
             StepId::Deploy => "Deploy light client",
             StepId::Submit => "Submit proof",
             StepId::Check => "Ask the contract",
+            StepId::Greeter => "Deploy Solana-controlled app",
+            StepId::Command => "Run the Solana command",
             StepId::Forged => "Forged proof rejected",
         }
     }
@@ -96,7 +104,7 @@ impl StepId {
     pub fn about(self) -> &'static str {
         match self {
             StepId::Doctor => "Looks for every tool the flow needs (Solana CLI and validator, ledger-dump, Foundry, Docker for Groth16) and says what is missing.",
-            StepId::Send => "Sends a small SOL transfer with your memo on the local Alpenglow chain, using the Solana CLI's default keypair.",
+            StepId::Send => "Sends a small SOL transfer with the memo huginn:<chain id>:greeter:<your text> on the local Alpenglow chain, signed by the Solana CLI's default keypair.",
             StepId::Finalize => "Polls the validator until the transaction's block is finalized, and notes whether the transaction itself succeeded (inclusion is not success).",
             StepId::Fetch => "ledger-dump reads the block's shreds from the validator's ledger and the certificate that finalized it (in the next block's footer, or from the plugin), checks both, and rebuilds the block_id.",
             StepId::Prove => "Runs Huginn's SP1 program: checks the BLS certificate and the stake threshold, rebuilds the block_id, finds the transaction, and proves all of it.",
@@ -104,6 +112,8 @@ impl StepId {
             StepId::Deploy => "forge runs script/Deploy.s.sol: SolanaLightClient, pinned to Huginn's program key, this cluster's shred version, and epoch 0's validator set hash.",
             StepId::Submit => "forge runs script/Submit.s.sol: the contract checks the proof, then records the block and the transaction.",
             StepId::Check => "cast asks the contract isVerified(signature): what any other contract on this chain can now rely on.",
+            StepId::Greeter => "forge runs script/DeployGreeter.s.sol: SolanaGreeter, a contract whose greeting only your Solana CLI key can change (SolanaControlled).",
+            StepId::Command => "Hands the same proof to SolanaGreeter.execute: signed by the controller, memo addressed to this chain and 'greeter', never used before. The greeting becomes your memo.",
             StepId::Forged => "Changes one byte of the memo in the proven output and asks the contract to verify it with the same proof. It must refuse.",
         }
     }
@@ -261,6 +271,8 @@ pub struct State {
     pub client: Option<String>,
     pub submit_gas: Option<u64>,
     pub verified: Option<bool>,
+    pub greeter: Option<String>,
+    pub greeting: Option<String>,
     pub forged_rejected: Option<bool>,
 }
 
@@ -318,6 +330,8 @@ impl Runner {
             StepId::Deploy => self.deploy().await,
             StepId::Submit => self.submit().await,
             StepId::Check => self.check().await,
+            StepId::Greeter => self.greeter().await,
+            StepId::Command => self.command().await,
             StepId::Forged => self.forged().await,
         }
     }
@@ -386,7 +400,12 @@ impl Runner {
     async fn send(&mut self) -> Result<String> {
         let id = StepId::Send;
         let rpc = self.settings.solana_rpc.clone();
-        let memo = self.settings.memo.clone();
+        // Addressed to the greeter on the EVM chain (SolanaControlled's memo format).
+        let chain = match self.cmd(id, "cast", &["chain-id", "--rpc-url", &self.settings.evm_rpc()], None, &[], true).await {
+            Ok(c) => c.trim().to_string(),
+            Err(_) => "31337".to_string(),
+        };
+        let memo = format!("huginn:{chain}:greeter:{}", self.settings.memo);
         let out = self
             .cmd(
                 id,
@@ -565,6 +584,8 @@ impl Runner {
             .context("no SolanaLightClient address in forge's output")?;
         self.state.client = Some(client.clone());
         self.state.verified = None;
+        self.state.greeter = None;
+        self.state.greeting = None;
         self.state.forged_rejected = None;
         Ok(format!("SolanaLightClient at {client}"))
     }
@@ -604,18 +625,7 @@ impl Runner {
         let client = self.state.client.clone().context("deploy first")?;
         let file = self.state.proof_file.clone().context("prove first")?;
         let rpc = self.settings.evm_rpc();
-        let summary: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-        let pv = hex::decode(summary["public_values"].as_str().context("public_values")?)?;
-        let mut proof = hex::decode(summary["proof"].as_str().unwrap_or(""))?;
-        if proof.is_empty() {
-            // The local stand-in verifier's "proof" for the real output.
-            let verifier = self.cmd(id, "cast", &["call", &client, "verifier()(address)", "--rpc-url", &rpc], None, &[], false).await?;
-            let vkey = self.cmd(id, "cast", &["call", &client, "programVKey()(bytes32)", "--rpc-url", &rpc], None, &[], true).await?;
-            let p = self
-                .cmd(id, "cast", &["call", verifier.trim(), "proofFor(bytes32,bytes)(bytes)", vkey.trim(), &format!("0x{}", hex::encode(&pv)), "--rpc-url", &rpc], None, &[], true)
-                .await?;
-            proof = hex::decode(p.trim().trim_start_matches("0x"))?;
-        }
+        let (pv, proof) = self.proof_bytes(id, &client, &file).await?;
         let proof_hex = format!("0x{}", hex::encode(&proof));
 
         self.log(id, "1) the real output with its proof:");
@@ -644,7 +654,73 @@ impl Runner {
         }
     }
 
+    async fn greeter(&mut self) -> Result<String> {
+        let id = StepId::Greeter;
+        ensure!(self.state.client.is_some(), "deploy the light client first");
+        let address = self.cmd(id, "solana", &["address"], None, &[], false).await?;
+        let key = bs58::decode(address.trim()).into_vec()?;
+        ensure!(key.len() == 32, "solana address is not 32 bytes");
+        self.log(id, format!("  controller = your Solana key, 0x{}", hex::encode(&key)));
+        let mut env = self.forge_env()?;
+        env.push(("SOLANA_CONTROLLER".into(), format!("0x{}", hex::encode(&key))));
+        let rpc = self.settings.evm_rpc();
+        let dir = self.settings.evm_dir.clone();
+        let out = self.forge(id, "script/DeployGreeter.s.sol", &rpc, &dir, &env).await?;
+        let greeter = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("SolanaGreeter:"))
+            .map(|a| a.trim().to_string())
+            .context("no SolanaGreeter address in forge's output")?;
+        let greeting = self.cmd(id, "cast", &["call", &greeter, "greeting()(string)", "--rpc-url", &rpc], None, &[], false).await?;
+        self.state.greeter = Some(greeter.clone());
+        self.state.greeting = Some(unquote(&greeting));
+        Ok(format!("SolanaGreeter at {greeter}, greeting {}", greeting.trim()))
+    }
+
+    async fn command(&mut self) -> Result<String> {
+        let id = StepId::Command;
+        let greeter = self.state.greeter.clone().context("deploy the greeter first")?;
+        let client = self.state.client.clone().context("deploy first")?;
+        let file = self.state.proof_file.clone().context("prove first")?;
+        let rpc = self.settings.evm_rpc();
+        let (pv, proof) = self.proof_bytes(id, &client, &file).await?;
+        let key = self.settings.private_key().context("PRIVATE_KEY")?;
+        self.cmd(
+            id,
+            "cast",
+            &["send", &greeter, "execute(bytes,bytes)", &format!("0x{}", hex::encode(&pv)), &format!("0x{}", hex::encode(&proof)), "--private-key", &key, "--rpc-url", &rpc],
+            None,
+            &[],
+            true,
+        )
+        .await?;
+        self.log(id, format!("$ cast send {} execute(bytes,bytes) <public values> <proof>", shorten_addr(&greeter)));
+        let greeting = self.cmd(id, "cast", &["call", &greeter, "greeting()(string)", "--rpc-url", &rpc], None, &[], false).await?;
+        let greeting = unquote(&greeting);
+        self.state.greeting = Some(greeting.clone());
+        ensure!(greeting == self.settings.memo, "greeting is {greeting:?}, the memo said {:?}", self.settings.memo);
+        Ok(format!("greeting is now \"{greeting}\""))
+    }
+
     // ---- helpers --------------------------------------------------------------------
+
+    /// The proof's public values and the bytes the verifier takes. A mock or compressed
+    /// proof has no onchain bytes, so the local stand-in verifier's "proof" is used.
+    async fn proof_bytes(&self, id: StepId, client: &str, file: &Path) -> Result<(Vec<u8>, Vec<u8>)> {
+        let rpc = self.settings.evm_rpc();
+        let summary: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+        let pv = hex::decode(summary["public_values"].as_str().context("public_values")?)?;
+        let mut proof = hex::decode(summary["proof"].as_str().unwrap_or(""))?;
+        if proof.is_empty() {
+            let verifier = self.cmd(id, "cast", &["call", client, "verifier()(address)", "--rpc-url", &rpc], None, &[], true).await?;
+            let vkey = self.cmd(id, "cast", &["call", client, "programVKey()(bytes32)", "--rpc-url", &rpc], None, &[], true).await?;
+            let p = self
+                .cmd(id, "cast", &["call", verifier.trim(), "proofFor(bytes32,bytes)(bytes)", vkey.trim(), &format!("0x{}", hex::encode(&pv)), "--rpc-url", &rpc], None, &[], true)
+                .await?;
+            proof = hex::decode(p.trim().trim_start_matches("0x"))?;
+        }
+        Ok((pv, proof))
+    }
 
     /// `forge script ... --broadcast`, showing only the script's own logs and the result
     /// (forge's full output is in the error if it fails).
@@ -730,6 +806,14 @@ impl Runner {
         }
         Ok(stdout)
     }
+}
+
+fn unquote(s: &str) -> String {
+    s.trim().trim_matches('"').to_string()
+}
+
+fn shorten_addr(a: &str) -> String {
+    if a.len() > 12 { format!("{}…{}", &a[..6], &a[a.len() - 4..]) } else { a.to_string() }
 }
 
 fn state_file(settings: &Settings) -> PathBuf {

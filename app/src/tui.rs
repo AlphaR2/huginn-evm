@@ -221,7 +221,7 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let [header, flow, body, settings, keys] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(5),
+            Constraint::Length(6),
             Constraint::Min(10),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -265,11 +265,13 @@ impl App {
                     _ => "—".into(),
                 },
             ),
+            kv("memo", s.signature.as_ref().map(|_| format!("\"{}\"", self.settings.memo)).unwrap_or("—".into())),
         ];
         let proof = vec![
             kv("mode", s.proof_mode.map(|m| m.as_str().to_string()).unwrap_or("—".into())),
             kv("cycles", s.cycles.map(fmt_cycles).unwrap_or("—".into())),
             kv("time", s.prove_secs.map(|t| format!("{t:.1}s")).unwrap_or("—".into())),
+            kv("key", short(&s.program_vkey)),
         ];
         let evm = vec![
             kv("client", short(&s.client)),
@@ -283,6 +285,7 @@ impl App {
                     _ => "—".into(),
                 },
             ),
+            kv("greeting", s.greeting.as_ref().map(|g| format!("\"{g}\"")).unwrap_or("—".into())),
         ];
         let chain = match s.chain_id {
             Some(31337) => " EVM · anvil ".to_string(),
@@ -494,12 +497,14 @@ mod tests {
             "SolanaLightClient at 0xe7f1…",
             "accepted, 105765 gas",
             "isVerified(signature) = true",
+            "SolanaGreeter at 0x8A79…C318, greeting gm",
+            "greeting is now \"hello from solana\"",
             "forged memo rejected, real one accepted",
         ];
         for (i, s) in summaries.iter().enumerate() {
             app.steps[i].status = Status::Ok(s.to_string(), Duration::from_millis(300 + 400 * i as u64));
         }
-        app.steps[9].log = vec![
+        app.steps[11].log = vec![
             "1) the real output with its proof:".into(),
             "$ cast call 0xe7f1… verify(bytes,bytes) 0x01b1f252… 0x1d44d290… --rpc-url http://127.0.0.1:8545".into(),
             "   accepted".into(),
@@ -507,8 +512,8 @@ mod tests {
             "$ cast call 0xe7f1… verify(bytes,bytes) 0x01b1f252… 0x1d44d290… --rpc-url http://127.0.0.1:8545".into(),
             "   rejected: InvalidProof".into(),
         ];
-        app.list.select(Some(9));
-        let mut t = Terminal::new(TestBackend::new(150, 34)).unwrap();
+        app.list.select(Some(11));
+        let mut t = Terminal::new(TestBackend::new(150, 38)).unwrap();
         t.draw(|f| app.draw(f)).unwrap();
         let buf = t.backend().buffer();
         for y in 0..buf.area.height {

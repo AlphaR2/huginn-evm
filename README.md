@@ -30,7 +30,8 @@ A single screen runs the whole flow:
 4. proves it with SP1;
 5. starts anvil, deploys the light client and submits the proof;
 6. asks the contract `isVerified`;
-7. shows that a forged proof is rejected.
+7. deploys a contract your Solana key controls, and runs your memo as its command;
+8. shows that a forged proof is rejected.
 
 Each step shows the exact command it ran and that command's output.
 
@@ -61,10 +62,13 @@ app/                        huginn-evm: TUI (src/tui.rs), the steps (src/steps.r
 src/SolanaLightClient.sol   verify(publicValues, proof) / submit(...): the contract apps call
 src/HuginnOutput.sol        reads the proof's output (same offsets as huginn's TxOutput::encode)
 src/SolanaTx.sol            reads a Solana transaction: signers, programs, accounts, data
+src/SolanaControlled.sol    base for contracts a Solana key controls (memo commands, no replay)
+src/examples/SolanaGreeter  the smallest one: a greeting only a Solana key can change
 src/ISP1Verifier.sol        Succinct's verifier interface
 src/mocks/BindingVerifier   local stand-in verifier (anvil only, never a real chain)
 script/Deploy.s.sol         deploy SolanaLightClient with the settings in .env
 script/Submit.s.sol         submit proofs/proof.json
+script/DeployGreeter.s.sol  deploy SolanaGreeter for a Solana key
 test/                       Foundry tests on the real proven memo transfer from huginn's local chain
 docs/demo.md                the demo, step by step, with what you should see
 .env.example                every setting, explained
@@ -107,6 +111,8 @@ forge test -vv
   `test/fixtures/` and point a test at Succinct's verifier.
 
 ## Using it from your contract
+
+The easiest way is to inherit `SolanaControlled` (see `src/examples/SolanaGreeter.sol`) and implement `_execute(command)`. Or use the pieces directly:
 
 ```solidity
 import {SolanaLightClient} from "hugin-evm/SolanaLightClient.sol";
