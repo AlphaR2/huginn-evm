@@ -2,7 +2,7 @@ out/
 cache/
 broadcast/
 lib/
-relayer/target/
+app/target/
 proofs/*
 !proofs/.gitkeep
 .env

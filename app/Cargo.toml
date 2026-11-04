@@ -1,6 +1,6 @@
 [package]
-name = "huginn-evm-relayer"
-description = "Makes Huginn proofs for EVM chains, using huginn as a library."
+name = "huginn-evm"
+description = "Huginn for EVM chains: a TUI that runs the whole Solana -> proof -> EVM flow step by step, the same steps as subcommands, and proof making on top of huginn-prover."
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -13,8 +13,12 @@ publish = false
 huginn-prover = { path = "../../huginn/zk/prover" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hex = "0.4"
 anyhow = "1"
+dotenvy = "0.15"
+ratatui = "0.30"
 
 # Required by huginn: the SP1-accelerated curve code it was proven equal to Agave with.
 [patch.crates-io]

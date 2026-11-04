@@ -10,63 +10,92 @@ one **destination** for those proofs:
 ```
 huginn (dependency)                      hugin-evm (this repo)
 ────────────────────                     ──────────────────────────────────────────────
-huginn-prover crate  ──▶ relayer/ ──▶ proof file ──▶ script/Submit.s.sol ──▶ SolanaLightClient
-  (SP1 program,          makes the                     sends it to          checks it, stores
-   Alpenglow checks)     proof                         your chain           block + tx; your
-                                                                            contracts read it
+huginn-prover crate  ──▶ app/ (huginn-evm) ──▶ script/Deploy, Submit ──▶ SolanaLightClient
+  (SP1 program,          TUI + subcommands:      forge sends to             checks the proof,
+   Alpenglow checks)     send, fetch, prove      your chain                 stores block + tx;
+                                                                            your contracts read it
 ```
+
+## The TUI
+
+```bash
+cd app && cargo build --release && cd ..
+./app/target/release/huginn-evm
+```
+
+A single screen runs the whole flow:
+1. checks your tools;
+2. sends a memo on the local Solana chain and waits for it to finalize;
+3. fetches the block's certificate and shreds;
+4. proves it with SP1;
+5. starts anvil, deploys the light client and submits the proof;
+6. asks the contract `isVerified`;
+7. shows that a forged proof is rejected.
+
+Each step shows the exact command it ran and that command's output.
+
+| Key | Does |
+|---|---|
+| `enter` | run every step |
+| `r` / `n` | run the selected step / from it to the end |
+| `m` | proof mode: `mock` (seconds), `compressed` (real STARK, ~5 min), `groth16` (real, for real chains) |
+| `e` | edit the memo |
+| `↑↓`, `J/K` | select a step, scroll its log |
+
+The same steps run without the TUI (scripts, CI):
+
+```bash
+./app/target/release/huginn-evm run                       # all
+./app/target/release/huginn-evm run send finalize fetch   # some, in order
+./app/target/release/huginn-evm run --mode compressed --memo "gm"
+./app/target/release/huginn-evm vkey                      # PROGRAM_VKEY
+```
+
+The flow's state is saved to `proofs/state.json` after every step, so steps can be run one at a time.
 
 ## Layout
 
 ```
+app/                        huginn-evm: TUI (src/tui.rs), the steps (src/steps.rs), subcommands (src/main.rs)
 src/SolanaLightClient.sol   verify(publicValues, proof) / submit(...): the contract apps call
 src/HuginnOutput.sol        reads the proof's output (same offsets as huginn's TxOutput::encode)
 src/SolanaTx.sol            reads a Solana transaction: signers, programs, accounts, data
 src/ISP1Verifier.sol        Succinct's verifier interface
 src/mocks/BindingVerifier   local stand-in verifier (anvil only, never a real chain)
 script/Deploy.s.sol         deploy SolanaLightClient with the settings in .env
-script/Submit.s.sol         submit the relayer's proof file
-relayer/                    Rust CLI on top of huginn-prover: `vkey`, `prove`
+script/Submit.s.sol         submit proofs/proof.json
 test/                       Foundry tests on the real proven memo transfer from huginn's local chain
+docs/demo.md                the demo, step by step, with what you should see
 .env.example                every setting, explained
 ```
 
 ## Setup
 
-You need: [Foundry](https://getfoundry.sh), Rust, the SP1 toolchain (`sp1up`) and `protoc`
-for the relayer. The relayer also needs Docker for Groth16 proofs on your own machine. huginn
-must be checked out next to this repo (`../huginn`), or switch `relayer/Cargo.toml` to its
-git dependency.
+You need:
+- [Foundry](https://getfoundry.sh), Rust, the SP1 toolchain (`sp1up`) and `protoc`;
+- the Solana CLI (Agave 4.4, for `solana-test-validator --alpenglow`);
+- huginn checked out next to this repo (`../huginn`), with its validator running with the
+  footer-dump plugin and `ledger-dump` built (see huginn's README). Or switch `app/Cargo.toml`
+  to huginn's git dependency;
+- Docker, only for Groth16 proofs made on your own machine.
 
 ```bash
-cp .env.example .env          # fill in your chain
+cp .env.example .env          # optional on anvil: an empty PRIVATE_KEY uses anvil's test key
 forge install foundry-rs/forge-std --no-git
 forge test -vv
-```
-
-## Run it locally (anvil, no real verifier)
-
-```bash
-anvil                                                   # terminal 1
-forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast   # set HUGINN_CLIENT from the output
-cp test/fixtures/real-1-validator-fast.compressed.json proofs/proof.json
-forge script script/Submit.s.sol --rpc-url $RPC_URL --broadcast
 ```
 
 ## Run it on a real chain (Base Sepolia, Base, ...)
 
 1. Set `RPC_URL`, `PRIVATE_KEY` and `SP1_VERIFIER` (Succinct's gateway on that chain) in `.env`.
-2. `cd relayer && cargo run --release -- vkey`, then put the result in `PROGRAM_VKEY`.
-3. Set `SHRED_VERSION`, `EPOCH`, `VALIDATOR_SET_HASH` for the Solana cluster you follow.
-4. Deploy: `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast`.
-5. Prove: `cd relayer && cargo run --release -- prove --block <ledger-dump file> --signature <tx> --mode groth16`.
-6. Submit: `forge script script/Submit.s.sol --rpc-url $RPC_URL --broadcast`.
+2. Set `SHRED_VERSION`, `EPOCH`, `VALIDATOR_SET_HASH` for the Solana cluster you follow.
+3. `./app/target/release/huginn-evm run --mode groth16`, or press `m` until groth16 in the TUI.
 
 ## Status (2026-11-04)
 
 - 19 Foundry tests pass on the real proven memo transfer from huginn's local chain.
-- Deployed and submitted on anvil: `isVerified(signature)` is true, and slot 46718's
-  block_id is stored.
+- The full flow runs on fresh transactions in ~8 s with mock proofs: send, finalize, fetch,
+  prove, deploy, submit, `isVerified` true, forged memo rejected (`InvalidProof`).
 - Gas on anvil, with the stand-in verifier:
   - deploy: 1,081,264;
   - first `submit`: **105,825**, including the 21k base cost.
