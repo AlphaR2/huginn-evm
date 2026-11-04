@@ -1,7 +1,7 @@
 # hugin-evm
 
 Use Solana transactions inside EVM contracts (Base first, any EVM chain the same way), with
-proofs made by [huginn](../huginn).
+proofs made by [huginn](https://github.com/AlphaR2/huginn).
 
 huginn does the Solana side: it proves *"this transaction is in a block that Solana's
 Alpenglow validators finalized"*, as one SP1 proof with a fixed-layout output. This repo is
@@ -76,7 +76,8 @@ docs/codebase.md            every file explained, in reading order
 You need:
 - [Foundry](https://getfoundry.sh), Rust, the SP1 toolchain (`sp1up`) and `protoc`;
 - the Solana CLI (Agave 4.4, for `solana-test-validator --alpenglow`);
-- huginn checked out next to this repo (`../huginn`), with its local Alpenglow validator
+- huginn checked out next to this repo (`../huginn`; step by step in huginn's
+  [`docs/run.md`](https://github.com/AlphaR2/huginn/blob/main/docs/run.md)), with its local Alpenglow validator
   running and `ledger-dump` built (see huginn's README). The footer-dump plugin is optional:
   certificates are read from the shreds by default. Or switch `app/Cargo.toml` to huginn's
   git dependency;
@@ -96,16 +97,21 @@ forge test -vv
 
 ## Status (2026-11-04)
 
-- 19 Foundry tests pass on the real proven memo transfer from huginn's local chain.
-- The full flow runs on fresh transactions in ~8 s with mock proofs: send, finalize, fetch,
-  prove, deploy, submit, `isVerified` true, forged memo rejected (`InvalidProof`).
+- 26 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
+  transaction parser, and the Solana-controlled greeter.
+- The full TUI flow runs on fresh transactions in ~10 s with practice proofs, and end to end
+  with a real STARK proof (~5 min).
+  - The steps: send, finalize, fetch, prove, deploy, submit, `isVerified` true.
+  - The greeter takes your memo as its greeting.
+  - The forged memo is rejected (`InvalidProof`).
 - Gas on anvil, with the stand-in verifier:
   - deploy: 1,081,264;
   - first `submit`: **105,825**, including the 21k base cost.
 
   The real Groth16 check adds roughly 270k, so expect ~380k per submit on a real chain.
-- Waiting on a real Groth16 proof from huginn. When one exists, put its summary in
-  `test/fixtures/` and point a test at Succinct's verifier.
+- **Waiting on a real Groth16 proof.** SP1's real verifier is in `src/sp1/`, and `test/Groth16.t.sol`
+  checks a proof against it (skipped until `test/fixtures/real-1-validator-fast.groth16.json`
+  exists). Making one needs ≥32 GB RAM: see huginn's `docs/run.md` (VPS steps).
 
 ## Using it from your contract
 
