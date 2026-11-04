@@ -154,7 +154,7 @@ A Rust crate that depends on huginn's `huginn-prover`. It has its own workspace,
 - `huginn-evm` opens the TUI.
 - `huginn-evm run [steps…]` runs steps without the screen, printing each step's log.
 - `huginn-evm vkey` prints the program key.
-- Flags: `--memo`, `--mode practice|compressed|groth16` (spelled `mock` on the command line), `--certs shreds|plugin`, `--huginn <path>`.
+- Flags: `--memo`, `--mode mock|compressed|groth16` (`mock` is what the TUI calls "practice"), `--certs shreds|plugin`, `--huginn <path>`.
 
 It must run from this repo, because it reads `.env` and `script/`.
 
