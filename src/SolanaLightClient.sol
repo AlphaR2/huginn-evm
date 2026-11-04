@@ -44,6 +44,7 @@ contract SolanaLightClient {
     event TransactionVerified(bytes32 indexed signatureHash, uint64 indexed slot, bytes32 blockId);
 
     error NotOwner();
+    error ZeroOwner();
     error UnknownEpoch(uint64 epoch);
     error WrongValidatorSet(bytes32 got, bytes32 expected);
     error WrongShredVersion(uint16 got);
@@ -73,7 +74,9 @@ contract SolanaLightClient {
         _;
     }
 
+    /// No zero address: an ownerless client could never store the next epoch's set.
     function setOwner(address owner_) external onlyOwner {
+        if (owner_ == address(0)) revert ZeroOwner();
         owner = owner_;
         emit OwnerChanged(owner_);
     }

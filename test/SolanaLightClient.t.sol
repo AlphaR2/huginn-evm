@@ -126,6 +126,9 @@ contract SolanaLightClientTest is Test {
         assertEq(client.validatorSetHash(1), keccak256("set 1"));
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.SetAlreadyStored.selector, 1));
         client.storeValidatorSet(1, keccak256("rewrite"));
+
+        vm.expectRevert(SolanaLightClient.ZeroOwner.selector);
+        client.setOwner(address(0));
     }
 
     function test_decodeRejectsBadFraming() public {

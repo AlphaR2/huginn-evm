@@ -62,6 +62,19 @@ forge script script/Submit.s.sol --rpc-url $RPC_URL --broadcast
 5. Prove: `cd relayer && cargo run --release -- prove --block <ledger-dump file> --signature <tx> --mode groth16`.
 6. Submit: `forge script script/Submit.s.sol --rpc-url $RPC_URL --broadcast`.
 
+## Status (2026-11-04)
+
+- 19 Foundry tests pass on the real proven memo transfer from huginn's local chain.
+- Deployed and submitted on anvil: `isVerified(signature)` is true, and slot 46718's
+  block_id is stored.
+- Gas on anvil, with the stand-in verifier:
+  - deploy: 1,081,264;
+  - first `submit`: **105,825**, including the 21k base cost.
+
+  The real Groth16 check adds roughly 270k, so expect ~380k per submit on a real chain.
+- Waiting on a real Groth16 proof from huginn. When one exists, put its summary in
+  `test/fixtures/` and point a test at Succinct's verifier.
+
 ## Using it from your contract
 
 ```solidity

@@ -48,7 +48,7 @@ library SolanaTx {
     }
 
     function parse(bytes memory raw) internal pure returns (Transaction memory t) {
-        uint256 p;
+        uint256 p = 0;
         uint256 n;
 
         (n, p) = _count(raw, p, 64);
