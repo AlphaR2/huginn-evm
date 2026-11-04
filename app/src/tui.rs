@@ -51,12 +51,14 @@ enum View {
     Details,
 }
 
-/// The four stages the guided view shows, and the steps each one covers.
-const STAGES: [(&str, &[StepId]); 4] = [
-    ("Send", &[StepId::Doctor, StepId::Send]),
+/// The five stages the guided view shows, and the steps each one covers. "Set up" deploys
+/// the contracts first, because your message names the greeter's address.
+const STAGES: [(&str, &[StepId]); 5] = [
+    ("Set up", &[StepId::Doctor, StepId::Anvil, StepId::Deploy, StepId::Greeter]),
+    ("Send", &[StepId::Send]),
     ("Finalize", &[StepId::Finalize, StepId::Fetch]),
     ("Prove", &[StepId::Prove]),
-    ("Verify", &[StepId::Anvil, StepId::Deploy, StepId::Submit, StepId::Check, StepId::Greeter, StepId::Command, StepId::Forged]),
+    ("Verify", &[StepId::Submit, StepId::Check, StepId::Command, StepId::Forged]),
 ];
 
 struct App {
@@ -520,13 +522,17 @@ impl App {
             (_, StageStatus::Failed) => "stopped".into(),
             (_, StageStatus::Pending) => String::new(),
             (_, StageStatus::Running) => "…".into(),
-            (0, StageStatus::Ok) => "sent".into(),
-            (1, StageStatus::Ok) => s.slot.map(|x| format!("slot {x}")).unwrap_or_default(),
-            (2, StageStatus::Ok) => match (s.proof_mode, s.prove_secs) {
+            (0, StageStatus::Ok) => "ready".into(),
+            (1, StageStatus::Ok) => "sent".into(),
+            (2, StageStatus::Ok) => s.slot.map(|x| format!("slot {x}")).unwrap_or_default(),
+            (3, StageStatus::Ok) => match (s.proof_mode, s.prove_secs) {
                 (Some(m), Some(t)) => format!("{}, {}", mode_name(m), fmt_dur(Duration::from_secs_f64(t))),
                 _ => "done".into(),
             },
-            (3, StageStatus::Ok) => "trusted".into(),
+            (4, StageStatus::Ok) => match s.proof_mode {
+                Some(ProofMode::Groth16) => "trusted".into(),
+                _ => "flow works".into(),
+            },
             _ => String::new(),
         }
     }
@@ -569,9 +575,10 @@ impl App {
         };
         f.render_widget(Paragraph::new(Line::from(msg)), message);
 
-        // ✓ Send ────── ✓ Finalize ────── ⠋ Prove ────── ○ Verify
-        let cols = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(stages);
-        let note_cols = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(notes);
+        // ✓ Set up ─── ✓ Send ─── ✓ Finalize ─── ⠋ Prove ─── ○ Verify
+        let n = STAGES.len() as u32;
+        let cols = Layout::horizontal([Constraint::Ratio(1, n); STAGES.len()]).split(stages);
+        let note_cols = Layout::horizontal([Constraint::Ratio(1, n); STAGES.len()]).split(notes);
         for (i, (name, steps)) in STAGES.iter().enumerate() {
             let (icon, style) = match self.stage_status(steps) {
                 StageStatus::Pending => ("○".to_string(), Style::new().fg(DIM)),
@@ -579,7 +586,7 @@ impl App {
                 StageStatus::Ok => ("✓".to_string(), Style::new().fg(OK).bold()),
                 StageStatus::Failed => ("✗".to_string(), Style::new().fg(BAD).bold()),
             };
-            let line = Line::from(vec![Span::raw("  "), Span::styled(format!("{icon} {name}"), style), Span::styled(if i < 3 { " ─────" } else { "" }, Style::new().fg(DIM))]);
+            let line = Line::from(vec![Span::raw("  "), Span::styled(format!("{icon} {name}"), style), Span::styled(if i + 1 < STAGES.len() { " ───" } else { "" }, Style::new().fg(DIM))]);
             f.render_widget(Paragraph::new(line), cols[i]);
             f.render_widget(Paragraph::new(Line::styled(format!("    {}", self.stage_note(i)), Style::new().fg(DIM))), note_cols[i]);
         }
@@ -657,12 +664,26 @@ impl App {
                 lines.push(Line::raw(""));
                 lines.extend(failure_help(s).into_iter().map(|l| Line::styled(format!("  {l}"), Style::new().fg(Color::Gray))));
             } else if all_ok && !self.busy {
-                border = OK;
                 lines.push(Line::raw(""));
                 let took = self.run_took.map(|d| format!(" in {}", fmt_dur(d))).unwrap_or_default();
-                lines.push(Line::styled(format!("  Done{took}. A contract on {} trusts your Solana message.", chain_name(self.state.chain_id)), Style::new().fg(OK).bold()));
-                if self.settings.mode == ProofMode::Mock || self.state.proof_mode == Some(ProofMode::Mock) {
-                    lines.push(Line::styled("  Practice proof: every check ran, but no real proof was made. Press m for a real one.", Style::new().fg(DIM)));
+                let chain = chain_name(self.state.chain_id);
+                // Only a Groth16 proof is checked for real on-chain. The other modes use the
+                // local stand-in verifier, which accepts a "proof" anyone can make.
+                match self.state.proof_mode.unwrap_or(self.settings.mode) {
+                    ProofMode::Groth16 => {
+                        border = OK;
+                        lines.push(Line::styled(format!("  Done{took}. A real proof of your message was checked on {chain}."), Style::new().fg(OK).bold()));
+                    }
+                    ProofMode::Compressed => {
+                        border = ACCENT;
+                        lines.push(Line::styled(format!("  Done{took}. A real proof was made and checked on this machine."), Style::new().fg(ACCENT).bold()));
+                        lines.push(Line::styled("  The contract itself used the local stand-in verifier: only a Groth16 proof is checked on-chain.", Style::new().fg(DIM)));
+                    }
+                    ProofMode::Mock => {
+                        border = ACCENT;
+                        lines.push(Line::styled(format!("  Practice run done{took}. The flow works, but nothing was proven."), Style::new().fg(ACCENT).bold()));
+                        lines.push(Line::styled("  SP1 ran every check without making a proof, and the stand-in verifier accepts anyone's. Press m for a real one.", Style::new().fg(DIM)));
+                    }
                 }
             } else {
                 border = Color::Yellow;
@@ -686,8 +707,8 @@ impl App {
             Line::raw(""),
             Line::styled("  Settings", Style::new().fg(ACCENT).bold()),
             k("m", &format!("proof: {}", mode_name(self.settings.mode))),
-            Line::styled("         practice: seconds; SP1 runs every check but makes no real proof", Style::new().fg(DIM)),
-            Line::styled("         real (STARK): ~5 minutes on a laptop", Style::new().fg(DIM)),
+            Line::styled("         practice: seconds; runs every check, makes no proof: proves nothing", Style::new().fg(DIM)),
+            Line::styled("         real (STARK): ~5 minutes on a laptop; checked here, not on-chain", Style::new().fg(DIM)),
             Line::styled("         real (Groth16): what real chains take; ~10+ min, needs Docker", Style::new().fg(DIM)),
             k("s", &format!("validators' signatures from: {}", match self.settings.certs {
                 crate::steps::CertSource::Shreds => "the next block (no plugin needed)",
@@ -712,7 +733,7 @@ fn mode_name(m: ProofMode) -> &'static str {
 
 fn time_hint(m: ProofMode) -> &'static str {
     match m {
-        ProofMode::Mock => "Takes about 10 seconds with a practice proof (press m for a real one).",
+        ProofMode::Mock => "About 10 seconds as a practice run, which proves nothing (m for a real proof).",
         ProofMode::Compressed => "Takes about 5 minutes: the real proof is the slow part.",
         ProofMode::Groth16 => "Takes 10+ minutes: the real Groth16 proof is the slow part.",
     }
@@ -770,8 +791,11 @@ fn done_text(id: StepId, s: &State, settings: &Settings) -> String {
         },
         StepId::Anvil => format!("Using {}", chain_name(s.chain_id)),
         StepId::Deploy => "Deployed the Huginn contract".into(),
-        StepId::Submit => "The contract checked the proof and accepted it".into(),
-        StepId::Check => "The contract now says your message is verified".into(),
+        StepId::Submit => match s.proof_mode {
+            Some(ProofMode::Groth16) => "The contract checked the proof and accepted it".into(),
+            _ => "The contract accepted it (with the local stand-in verifier)".into(),
+        },
+        StepId::Check => "The contract now lists your message as verified".into(),
         StepId::Greeter => "Deployed a contract only your Solana wallet controls".into(),
         StepId::Command => format!("Your message changed it: it now says \"{}\"", s.greeting.clone().unwrap_or_else(|| settings.memo.clone())),
         StepId::Forged => "A forged copy of your message was rejected".into(),
@@ -869,15 +893,15 @@ mod tests {
         }
         let summaries = [
             "ready (groth16 needs: circuits)",
+            "anvil started, chain 31337",
+            "SolanaLightClient at 0xe7f1…",
+            "SolanaGreeter at 0x8A79…C318, greeting gm",
             "signature 638WLVFo…",
             "slot 124404 finalized",
             "block_id rebuilt and certified",
             "mock proof in 0.4s, 5122326 cycles",
-            "anvil started, chain 31337",
-            "SolanaLightClient at 0xe7f1…",
             "accepted, 105765 gas",
             "isVerified(signature) = true",
-            "SolanaGreeter at 0x8A79…C318, greeting gm",
             "greeting is now \"hello from solana\"",
             "forged memo rejected, real one accepted",
         ];
@@ -934,12 +958,13 @@ mod guided_tests {
         render(&mut a, "before start");
 
         let ms = |n| Duration::from_millis(n);
-        for (i, _) in StepId::ALL.iter().enumerate().take(4) {
+        let prove = index(StepId::Prove);
+        for i in 0..prove {
             a.steps[i].status = Status::Ok(String::new(), ms(500));
         }
         a.state.slot = Some(126768);
         a.state.tx_ok = Some(true);
-        a.steps[4].status = Status::Running(Instant::now() - ms(2300));
+        a.steps[prove].status = Status::Running(Instant::now() - ms(2300));
         a.settings.mode = ProofMode::Compressed;
         a.busy = true;
         render(&mut a, "proving");
@@ -954,7 +979,10 @@ mod guided_tests {
         a.state.prove_secs = Some(0.4);
         a.state.chain_id = Some(31337);
         a.state.greeting = Some("gm from solana".into());
-        render(&mut a, "done");
+        render(&mut a, "done (practice)");
+
+        a.state.proof_mode = Some(ProofMode::Groth16);
+        render(&mut a, "done (groth16)");
 
         let mut b = app();
         b.steps[0].status = Status::Failed("missing: validator".into(), ms(300));

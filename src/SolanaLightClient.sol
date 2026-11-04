@@ -90,7 +90,8 @@ contract SolanaLightClient {
         return slot / slotsPerEpoch;
     }
 
-    /// Checks a proof and returns what it proves, without writing anything.
+    /// Checks a proof and returns what it proves, without writing anything. Also refuses a
+    /// block that conflicts with one already submitted for the same slot.
     function verify(bytes calldata publicValues, bytes calldata proof)
         public
         view
@@ -103,6 +104,10 @@ contract SolanaLightClient {
         bytes32 expected = validatorSetHash[epoch];
         if (expected == bytes32(0)) revert UnknownEpoch(epoch);
         if (out.validatorSetHash != expected) revert WrongValidatorSet(out.validatorSetHash, expected);
+        // Another block_id already recorded for this slot: refuse here too, not only in
+        // `submit`, so applications that call `verify` get the same protection.
+        bytes32 stored = finalizedBlock[out.slot];
+        if (stored != bytes32(0) && stored != out.blockId) revert ConflictingBlock(out.slot, stored, out.blockId);
     }
 
     /// `verify`, then records the block and the transaction so other contracts can look
@@ -111,13 +116,10 @@ contract SolanaLightClient {
         external
         returns (HuginnOutput.Output memory out)
     {
-        out = verify(publicValues, proof);
-        bytes32 stored = finalizedBlock[out.slot];
-        if (stored == bytes32(0)) {
+        out = verify(publicValues, proof); // reverts on a conflicting block
+        if (finalizedBlock[out.slot] == bytes32(0)) {
             finalizedBlock[out.slot] = out.blockId;
             emit BlockFinalized(out.slot, out.blockId);
-        } else if (stored != out.blockId) {
-            revert ConflictingBlock(out.slot, stored, out.blockId);
         }
         bytes32 sigHash = keccak256(SolanaTx.firstSignature(out.transaction));
         transactionSlot[sigHash] = out.slot;

@@ -30,44 +30,85 @@ contract SolanaGreeterTest is Test {
 
     function test_controllerChangesTheGreeting() public {
         assertEq(greeter.greeting(), "gm");
-        _execute(_memoTx(CONTROLLER, 1, _memo(block.chainid, "greeter", "hello from solana")));
+        _execute(_memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "hello from solana")));
         assertEq(greeter.greeting(), "hello from solana");
+        assertEq(greeter.nonce(), 1);
+    }
+
+    function test_memoPrefixIsWhatToolsBuild() public view {
+        assertEq(
+            greeter.memoPrefix(),
+            string.concat("huginn:", vm.toString(block.chainid), ":", vm.toLowercase(vm.toString(address(greeter))), ":")
+        );
+    }
+
+    function test_addressInAnyLetterCase() public {
+        // vm.toString(address) is the checksummed (mixed-case) form explorers show.
+        bytes memory memo = abi.encodePacked("huginn:", vm.toString(block.chainid), ":", vm.toString(address(greeter)), ":1:mixed case");
+        _execute(_memoTx(CONTROLLER, 1, memo));
+        assertEq(greeter.greeting(), "mixed case");
     }
 
     function test_strangerCannot() public {
-        bytes memory pv = _pv(_memoTx(STRANGER, 1, _memo(block.chainid, "greeter", "pwned")));
-        bytes memory proof = verifier.proofFor(VKEY, pv);
-        vm.expectRevert(SolanaControlled.NotSignedByController.selector);
-        greeter.execute(pv, proof);
+        _expectRevert(_memoTx(STRANGER, 1, _memo(block.chainid, address(greeter), "1", "pwned")), abi.encodeWithSelector(SolanaControlled.NotSignedByController.selector));
     }
 
     function test_noReplay() public {
-        bytes memory tx_ = _memoTx(CONTROLLER, 1, _memo(block.chainid, "greeter", "once"));
+        bytes memory tx_ = _memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "once"));
         _execute(tx_);
-        bytes memory pv = _pv(tx_);
-        bytes memory proof = verifier.proofFor(VKEY, pv);
-        vm.expectRevert(SolanaControlled.AlreadyExecuted.selector);
-        greeter.execute(pv, proof);
-        // A new transaction (new signature) with the same text is a new command.
-        _execute(_memoTx(CONTROLLER, 2, _memo(block.chainid, "greeter", "once")));
+        _expectRevert(tx_, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
+        // The same text again needs the next nonce.
+        _execute(_memoTx(CONTROLLER, 2, _memo(block.chainid, address(greeter), "2", "once")));
+        assertEq(greeter.nonce(), 2);
+    }
+
+    function test_commandsRunInOrder() public {
+        bytes memory first = _memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "A"));
+        bytes memory second = _memoTx(CONTROLLER, 2, _memo(block.chainid, address(greeter), "2", "B"));
+        // A relayer can't run the second before the first...
+        _expectRevert(second, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(2), uint64(1)));
+        _execute(first);
+        _execute(second);
+        // ...nor the first after the second.
+        _expectRevert(first, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(3)));
+        assertEq(greeter.greeting(), "B");
+    }
+
+    function test_emptyCommandCancels() public {
+        bytes memory signed = _memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "regretted"));
+        _execute(_memoTx(CONTROLLER, 2, _memo(block.chainid, address(greeter), "1", "")));
+        assertEq(greeter.greeting(), "gm");
+        assertEq(greeter.nonce(), 1);
+        _expectRevert(signed, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
+    }
+
+    function test_badNoncesRejected() public {
+        string[5] memory bad = ["", "01", "x", "1x", "12345678901234567890"];
+        for (uint256 i; i < bad.length; i++) {
+            _expectRevert(_memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), bad[i], "hi")), abi.encodeWithSelector(SolanaControlled.BadNonce.selector));
+        }
+        // No ':' after the nonce.
+        bytes memory noColon = abi.encodePacked(greeter.memoPrefix(), "1");
+        _expectRevert(_memoTx(CONTROLLER, 1, noColon), abi.encodeWithSelector(SolanaControlled.BadNonce.selector));
     }
 
     function test_memoForAnotherChainIsIgnored() public {
-        bytes memory pv = _pv(_memoTx(CONTROLLER, 1, _memo(8453, "greeter", "base mainnet only")));
-        bytes memory proof = verifier.proofFor(VKEY, pv);
-        vm.expectRevert(SolanaControlled.NoCommand.selector);
-        greeter.execute(pv, proof);
+        _expectRevert(_memoTx(CONTROLLER, 1, _memo(8453, address(greeter), "1", "base mainnet only")), abi.encodeWithSelector(SolanaControlled.NoCommand.selector));
     }
 
-    function test_memoForAnotherContractIsIgnored() public {
-        bytes memory pv = _pv(_memoTx(CONTROLLER, 1, _memo(block.chainid, "vault", "withdraw")));
+    function test_memoForAnotherDeploymentIsIgnored() public {
+        SolanaGreeter v2 = new SolanaGreeter(client, CONTROLLER);
+        bytes memory forV1 = _memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "v1 only"));
+        _execute(forV1);
+        bytes memory pv = _pv(forV1);
         bytes memory proof = verifier.proofFor(VKEY, pv);
         vm.expectRevert(SolanaControlled.NoCommand.selector);
-        greeter.execute(pv, proof);
+        v2.execute(pv, proof);
+        assertEq(v2.greeting(), "gm");
     }
 
     function test_forgedCommandRejected() public {
-        bytes memory pv = _pv(_memoTx(CONTROLLER, 1, _memo(block.chainid, "greeter", "hello")));
+        bytes memory pv = _pv(_memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", "hello")));
         bytes memory proof = verifier.proofFor(VKEY, pv);
         pv[pv.length - 1] = "X"; // "hellX": not what the controller signed
         vm.expectRevert(BindingVerifier.InvalidProof.selector);
@@ -75,12 +116,12 @@ contract SolanaGreeterTest is Test {
     }
 
     function test_longCommand() public {
-        // 200 bytes: the data length takes two compact-u16 bytes.
+        // 200+ bytes: the data length takes two compact-u16 bytes.
         bytes memory long = new bytes(200);
         for (uint256 i; i < long.length; i++) {
             long[i] = "a";
         }
-        _execute(_memoTx(CONTROLLER, 1, _memo(block.chainid, "greeter", string(long))));
+        _execute(_memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), "1", string(long))));
         assertEq(bytes(greeter.greeting()).length, 200);
     }
 
@@ -91,13 +132,22 @@ contract SolanaGreeterTest is Test {
         greeter.execute(pv, verifier.proofFor(VKEY, pv));
     }
 
-    function _memo(uint256 chain, string memory target, string memory command) internal pure returns (bytes memory) {
-        return abi.encodePacked("huginn:", vm.toString(chain), ":", target, ":", command);
+    function _expectRevert(bytes memory tx_, bytes memory err) internal {
+        bytes memory pv = _pv(tx_);
+        bytes memory proof = verifier.proofFor(VKEY, pv);
+        vm.expectRevert(err);
+        greeter.execute(pv, proof);
+    }
+
+    /// `huginn:<chain>:<address, lowercase>:<nonce>:<command>`
+    function _memo(uint256 chain, address to, string memory nonce, string memory command) internal pure returns (bytes memory) {
+        return abi.encodePacked("huginn:", vm.toString(chain), ":", vm.toLowercase(vm.toString(to)), ":", nonce, ":", command);
     }
 
     /// Legacy transaction: 1 signature, keys [signer, Memo program], one Memo instruction.
-    function _memoTx(bytes32 signer, uint8 nonce, bytes memory memo) internal pure returns (bytes memory) {
-        bytes memory sig = abi.encodePacked(bytes32(uint256(nonce)), bytes32(0));
+    /// `sigSeed` only changes the signature bytes.
+    function _memoTx(bytes32 signer, uint8 sigSeed, bytes memory memo) internal pure returns (bytes memory) {
+        bytes memory sig = abi.encodePacked(bytes32(uint256(sigSeed)), bytes32(0));
         return bytes.concat(
             hex"01", sig, // signatures
             hex"010001", // header: 1 signer, 0 readonly signed, 1 readonly unsigned

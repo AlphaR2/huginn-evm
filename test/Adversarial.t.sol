@@ -7,12 +7,10 @@ import {SolanaControlled} from "../src/SolanaControlled.sol";
 import {SolanaGreeter} from "../src/examples/SolanaGreeter.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
 
-/// Adversarial proofs-of-concept from an outside review. NOT YET RUN: the reviewer's machine
-/// had no Foundry, so run `forge test --match-contract Adversarial -vv` and treat any compile
-/// error as a bug in this file, not a finding.
+/// Adversarial proofs-of-concept from an outside review (docs/adversarial-report.md in huginn).
 ///
-/// Every test PASSES when the weakness is present (it asserts the bad outcome). If you fix a
-/// weakness, flip the matching test to expect the revert.
+/// `test_POC_*` PASSES while the weakness is present (it asserts the bad outcome).
+/// `test_FIXED_*` is a former PoC flipped after the fix: it asserts the attack now fails.
 ///
 /// The stand-in verifier lets the test mint a "proof" for any public values. That is the
 /// same power a real prover has over values it can legitimately prove, so each test only
@@ -35,47 +33,47 @@ contract AdversarialTest is Test {
         greeter = new SolanaGreeter(client, CONTROLLER);
     }
 
-    // ---- F1: no ordering, no expiry, no deployment binding ---------------------------------
+    // ---- F1: ordering, expiry, deployment binding (FIXED: nonce + address in the memo) ----
 
-    /// The controller signs "set A" and then "set B", meaning the greeting should end as B.
-    /// Anyone can relay the proofs in any order, so the attacker makes the stale command win.
-    function test_POC_commandsCanBeRelayedOutOfOrder() public {
-        bytes memory first = _memoTx(CONTROLLER, 1, _memo("greeter", "A (old, superseded)"));
-        bytes memory second = _memoTx(CONTROLLER, 2, _memo("greeter", "B (latest intent)"));
+    /// The controller signs "set A" (nonce 1) and then "set B" (nonce 2). Relaying them out
+    /// of order no longer lets the stale command win.
+    function test_FIXED_commandsCannotBeRelayedOutOfOrder() public {
+        bytes memory first = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "A (old, superseded)"));
+        bytes memory second = _memoTx(CONTROLLER, 2, _memo(greeter, 2, "B (latest intent)"));
+        _expectRevert(greeter, second, 50_001, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(2), uint64(1)));
+        _execute(greeter, first, 50_000);
         _execute(greeter, second, 50_001);
-        _execute(greeter, first, 50_000); // relayed late, by anyone
-        assertEq(greeter.greeting(), "A (old, superseded)", "the older command overwrote the newer one");
+        _expectRevert(greeter, first, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(3)));
+        assertEq(greeter.greeting(), "B (latest intent)");
     }
 
-    /// A command the controller signed for one deployment runs on any other deployment that
-    /// uses the same target name and controller (a redeploy, a v2, a fork of the contract).
-    function test_POC_oldCommandReplaysOnANewDeployment() public {
-        bytes memory old = _memoTx(CONTROLLER, 1, _memo("greeter", "sign me once"));
+    /// A command signed for one deployment does not run on a redeploy: the memo names the
+    /// contract's address.
+    function test_FIXED_oldCommandDoesNotReplayOnANewDeployment() public {
+        bytes memory old = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "sign me once"));
         _execute(greeter, old, 50_000);
 
         SolanaGreeter v2 = new SolanaGreeter(client, CONTROLLER);
+        _expectRevert(v2, old, 50_000, abi.encodeWithSelector(SolanaControlled.NoCommand.selector));
         assertEq(v2.greeting(), "gm");
-        _execute(v2, old, 50_000); // same transaction, never meant for v2
-        assertEq(v2.greeting(), "sign me once");
     }
 
-    /// There is no freshness check: a command that was never relayed stays valid forever.
-    function test_POC_unrelayedCommandNeverExpires() public {
-        bytes memory old = _memoTx(CONTROLLER, 1, _memo("greeter", "dormant"));
+    /// Still no time-based expiry, but a dormant command can now be cancelled: the
+    /// controller relays an empty command with the same nonce first.
+    function test_FIXED_unrelayedCommandCanBeCancelled() public {
+        bytes memory dormant = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "dormant"));
+        _execute(greeter, _memoTx(CONTROLLER, 2, _memo(greeter, 1, "")), 50_001);
         vm.warp(block.timestamp + 5 * 365 days);
-        _execute(greeter, old, 50_000);
-        assertEq(greeter.greeting(), "dormant");
+        _expectRevert(greeter, dormant, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
+        assertEq(greeter.greeting(), "gm");
     }
 
-    /// The replay guard is the transaction's first signature. Two signatures over the SAME
-    /// message (what a malleable signature would give) are two different "transactions".
-    /// Safe only while Solana never produces a second valid signature for a message.
-    function test_POC_replayGuardIsKeyedOnSignatureNotMessage() public {
-        bytes memory m = _memo("greeter", "same message");
+    /// Two signatures over the same message: the second is refused, because the guard is the
+    /// nonce inside the signed message, not the signature bytes.
+    function test_FIXED_replayGuardIsTheSignedNonce() public {
+        bytes memory m = _memo(greeter, 1, "same message");
         _execute(greeter, _memoTx(CONTROLLER, 1, m), 50_000);
-        _execute(greeter, _memoTx(CONTROLLER, 2, m), 50_000); // same message, other signature bytes
-        assertTrue(greeter.executed(keccak256(abi.encodePacked(bytes32(uint256(1)), bytes32(0)))));
-        assertTrue(greeter.executed(keccak256(abi.encodePacked(bytes32(uint256(2)), bytes32(0)))));
+        _expectRevert(greeter, _memoTx(CONTROLLER, 2, m), 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
     }
 
     // ---- F2: the validator-set owner is the root of trust ----------------------------------
@@ -86,7 +84,7 @@ contract AdversarialTest is Test {
     function test_POC_ownerKeyForgesAnyControllerCommand() public {
         bytes32 evilSet = keccak256("attacker's own validator set");
         client.storeValidatorSet(1, evilSet); // this test contract is the owner
-        bytes memory forged = _memoTx(CONTROLLER, 9, _memo("greeter", "owned by whoever holds the owner key"));
+        bytes memory forged = _memoTx(CONTROLLER, 9, _memo(greeter, 1, "owned by whoever holds the owner key"));
         bytes memory pv = _pv(forged, 432_001, evilSet, keccak256("a block that never existed"));
         greeter.execute(pv, verifier.proofFor(VKEY, pv));
         assertEq(greeter.greeting(), "owned by whoever holds the owner key");
@@ -102,7 +100,7 @@ contract AdversarialTest is Test {
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.SetAlreadyStored.selector, uint64(1)));
         client.storeValidatorSet(1, realSet1);
 
-        bytes memory tx_ = _memoTx(CONTROLLER, 1, _memo("greeter", "x"));
+        bytes memory tx_ = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "x"));
         bytes memory pv = _pv(tx_, 432_001, realSet1, keccak256("real block"));
         bytes memory proof = verifier.proofFor(VKEY, pv);
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.WrongValidatorSet.selector, realSet1, typo));
@@ -118,23 +116,26 @@ contract AdversarialTest is Test {
         client.storeValidatorSet(1, keccak256("next epoch"));
     }
 
-    // ---- F5: `verify` ignores the conflicting-block record ---------------------------------
+    // ---- F7: `verify` ignored the conflicting-block record (FIXED) ----------------------
 
-    /// `submit` refuses a second block at an already-finalized slot (ConflictingBlock), but
-    /// `verify`, which SolanaControlled uses, never looks at that record.
-    function test_POC_applicationsBypassTheConflictingBlockCheck() public {
-        bytes memory t1 = _memoTx(CONTROLLER, 1, _memo("greeter", "on block A"));
+    /// After block A is submitted for slot 50,000, a proof about a different block B at the
+    /// same slot is refused by `verify` too, so applications get the same protection.
+    function test_FIXED_applicationsGetTheConflictingBlockCheck() public {
+        bytes memory t1 = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "on block A"));
         bytes memory pv1 = _pv(t1, 50_000, SET_0, keccak256("block A"));
         client.submit(pv1, verifier.proofFor(VKEY, pv1));
 
-        bytes memory t2 = _memoTx(CONTROLLER, 2, _memo("greeter", "on block B"));
+        bytes memory t2 = _memoTx(CONTROLLER, 2, _memo(greeter, 1, "on block B"));
         bytes memory pv2 = _pv(t2, 50_000, SET_0, keccak256("block B"));
         bytes memory proof2 = verifier.proofFor(VKEY, pv2);
-        vm.expectRevert(SolanaLightClient.ConflictingBlock.selector);
+        bytes memory conflict = abi.encodeWithSelector(
+            SolanaLightClient.ConflictingBlock.selector, uint64(50_000), keccak256("block A"), keccak256("block B")
+        );
+        vm.expectRevert(conflict);
         client.submit(pv2, proof2);
-
-        greeter.execute(pv2, proof2); // the application path never consults finalizedBlock
-        assertEq(greeter.greeting(), "on block B");
+        vm.expectRevert(conflict);
+        greeter.execute(pv2, proof2);
+        assertEq(greeter.greeting(), "gm");
     }
 
     // ---- building blocks (same layout as SolanaGreeter.t.sol) ------------------------------
@@ -144,14 +145,21 @@ contract AdversarialTest is Test {
         g.execute(pv, verifier.proofFor(VKEY, pv));
     }
 
-    function _memo(string memory target, string memory command) internal view returns (bytes memory) {
-        return abi.encodePacked("huginn:", vm.toString(block.chainid), ":", target, ":", command);
+    function _expectRevert(SolanaGreeter g, bytes memory tx_, uint64 slot, bytes memory err) internal {
+        bytes memory pv = _pv(tx_, slot, SET_0, keccak256(abi.encodePacked("block", slot)));
+        bytes memory proof = verifier.proofFor(VKEY, pv);
+        vm.expectRevert(err);
+        g.execute(pv, proof);
+    }
+
+    function _memo(SolanaGreeter g, uint256 nonce, string memory command) internal view returns (bytes memory) {
+        return abi.encodePacked(g.memoPrefix(), vm.toString(nonce), ":", command);
     }
 
     /// Legacy transaction: 1 signature, keys [signer, Memo program], one Memo instruction.
-    /// `nonce` only changes the signature bytes, never the message.
-    function _memoTx(bytes32 signer, uint8 nonce, bytes memory memo) internal pure returns (bytes memory) {
-        bytes memory sig = abi.encodePacked(bytes32(uint256(nonce)), bytes32(0));
+    /// `sigSeed` only changes the signature bytes, never the message.
+    function _memoTx(bytes32 signer, uint8 sigSeed, bytes memory memo) internal pure returns (bytes memory) {
+        bytes memory sig = abi.encodePacked(bytes32(uint256(sigSeed)), bytes32(0));
         return bytes.concat(
             hex"01", sig,
             hex"010001",

@@ -20,21 +20,22 @@ use {
 
 /// anvil's first default account: a public test key, only ever used on a local chain.
 const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const ANVIL_CHAIN_ID: u64 = 31337;
 /// Who the memo transfer pays: a fixed throwaway address on the local chain.
 const RECIPIENT: &str = "7eEm8iDQomGBvWzz159ATKbvG3aZfaBfTz6LvnDERmRR";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepId {
     Doctor,
+    Anvil,
+    Deploy,
+    Greeter,
     Send,
     Finalize,
     Fetch,
     Prove,
-    Anvil,
-    Deploy,
     Submit,
     Check,
-    Greeter,
     Command,
     Forged,
 }
@@ -48,17 +49,19 @@ pub enum Side {
 }
 
 impl StepId {
+    /// The order a full run takes. The EVM contracts come first: the memo names the
+    /// greeter's address and next nonce, so the greeter must exist before the memo is sent.
     pub const ALL: [StepId; 12] = [
         StepId::Doctor,
+        StepId::Anvil,
+        StepId::Deploy,
+        StepId::Greeter,
         StepId::Send,
         StepId::Finalize,
         StepId::Fetch,
         StepId::Prove,
-        StepId::Anvil,
-        StepId::Deploy,
         StepId::Submit,
         StepId::Check,
-        StepId::Greeter,
         StepId::Command,
         StepId::Forged,
     ];
@@ -104,16 +107,16 @@ impl StepId {
     pub fn about(self) -> &'static str {
         match self {
             StepId::Doctor => "Looks for every tool the flow needs (Solana CLI and validator, ledger-dump, Foundry, Docker for Groth16) and says what is missing.",
-            StepId::Send => "Sends a small SOL transfer with the memo huginn:<chain id>:greeter:<your text> on the local Alpenglow chain, signed by the Solana CLI's default keypair.",
+            StepId::Send => "Sends a small SOL transfer with the memo huginn:<chain id>:<greeter address>:<next nonce>:<your text> on the local Alpenglow chain, signed by the Solana CLI's default keypair.",
             StepId::Finalize => "Polls the validator until the transaction's block is finalized, and notes whether the transaction itself succeeded (inclusion is not success).",
             StepId::Fetch => "ledger-dump reads the block's shreds from the validator's ledger and the certificate that finalized it (in the next block's footer, or from the plugin), checks both, and rebuilds the block_id.",
             StepId::Prove => "Runs Huginn's SP1 program: checks the BLS certificate and the stake threshold, rebuilds the block_id, finds the transaction, and proves all of it.",
             StepId::Anvil => "Uses the EVM chain at RPC_URL; starts a local anvil if it is the default and nothing is running.",
-            StepId::Deploy => "forge runs script/Deploy.s.sol: SolanaLightClient, pinned to Huginn's program key, this cluster's shred version, and epoch 0's validator set hash.",
+            StepId::Deploy => "Computes Huginn's program key, then forge runs script/Deploy.s.sol: SolanaLightClient, pinned to that key, this cluster's shred version, and epoch 0's validator set hash.",
             StepId::Submit => "forge runs script/Submit.s.sol: the contract checks the proof, then records the block and the transaction.",
             StepId::Check => "cast asks the contract isVerified(signature): what any other contract on this chain can now rely on.",
             StepId::Greeter => "forge runs script/DeployGreeter.s.sol: SolanaGreeter, a contract whose greeting only your Solana CLI key can change (SolanaControlled).",
-            StepId::Command => "Hands the same proof to SolanaGreeter.execute: signed by the controller, memo addressed to this chain and 'greeter', never used before. The greeting becomes your memo.",
+            StepId::Command => "forge runs script/Execute.s.sol: the same proof goes to SolanaGreeter.execute, which checks the controller signed it, the memo names this chain and this greeter, and its nonce is the next one. The greeting becomes your memo.",
             StepId::Forged => "Changes one byte of the memo in the proven output and asks the contract to verify it with the same proof. It must refuse.",
         }
     }
@@ -239,16 +242,20 @@ impl Settings {
         self.env.get("RPC_URL").filter(|v| !v.is_empty()).cloned().unwrap_or_else(|| "http://127.0.0.1:8545".into())
     }
 
-    fn is_local_evm(&self) -> bool {
+    /// Whether the RPC URL points at this machine: only used to decide whether to start
+    /// anvil. Never used to pick a key (an SSH tunnel to a real chain is also "localhost").
+    fn rpc_is_this_machine(&self) -> bool {
         let rpc = self.evm_rpc();
         rpc.contains("127.0.0.1") || rpc.contains("localhost")
     }
 
-    fn private_key(&self) -> Option<String> {
+    /// `PRIVATE_KEY` from `.env`; with none set, anvil's public test key, but only when the
+    /// chain itself says it is anvil (chain id 31337).
+    fn private_key(&self, chain_id: u64) -> Result<String> {
         match self.env.get("PRIVATE_KEY").filter(|v| !v.is_empty()) {
-            Some(k) => Some(k.clone()),
-            None if self.is_local_evm() => Some(ANVIL_KEY.into()),
-            None => None,
+            Some(k) => Ok(k.clone()),
+            None if chain_id == ANVIL_CHAIN_ID => Ok(ANVIL_KEY.into()),
+            None => bail!("set PRIVATE_KEY in .env: chain {chain_id} is not a local anvil chain"),
         }
     }
 }
@@ -367,7 +374,7 @@ impl Runner {
             Ok(_) => self.log(id, format!("✓ validator {} is up", self.settings.solana_rpc)),
             Err(_) => {
                 self.log(id, format!("✗ validator not reachable at {}", self.settings.solana_rpc));
-                self.log(id, "    in huginn: solana-test-validator --alpenglow --ledger .local-ledger --geyser-plugin-config plugins/footer-dump/config.json");
+                self.log(id, "    in huginn: solana-test-validator --alpenglow --ledger .local-ledger");
                 missing.push("validator");
             }
         }
@@ -400,12 +407,13 @@ impl Runner {
     async fn send(&mut self) -> Result<String> {
         let id = StepId::Send;
         let rpc = self.settings.solana_rpc.clone();
-        // Addressed to the greeter on the EVM chain (SolanaControlled's memo format).
-        let chain = match self.cmd(id, "cast", &["chain-id", "--rpc-url", &self.settings.evm_rpc()], None, &[], true).await {
-            Ok(c) => c.trim().to_string(),
-            Err(_) => "31337".to_string(),
-        };
-        let memo = format!("huginn:{chain}:greeter:{}", self.settings.memo);
+        // Addressed to the greeter (SolanaControlled's memo format): its prefix names the
+        // EVM chain and its address, then comes the next nonce.
+        let greeter = self.state.greeter.clone().context("deploy the greeter first: the memo names its address")?;
+        let evm = self.settings.evm_rpc();
+        let prefix = unquote(&self.cmd(id, "cast", &["call", &greeter, "memoPrefix()(string)", "--rpc-url", &evm], None, &[], true).await?);
+        let nonce: u64 = self.cmd(id, "cast", &["call", &greeter, "nonce()(uint64)", "--rpc-url", &evm], None, &[], true).await?.trim().parse()?;
+        let memo = format!("{prefix}{}:{}", nonce + 1, self.settings.memo);
         let out = self
             .cmd(
                 id,
@@ -420,7 +428,16 @@ impl Runner {
             .as_str()
             .context("no signature in the CLI's output")?
             .to_string();
-        self.state = State { signature: Some(sig.clone()), ..State::default() };
+        // A new transaction: forget the previous one's results, keep the contracts.
+        self.state = State {
+            signature: Some(sig.clone()),
+            chain_id: self.state.chain_id,
+            program_vkey: self.state.program_vkey.clone(),
+            client: self.state.client.clone(),
+            greeter: self.state.greeter.clone(),
+            greeting: self.state.greeting.clone(),
+            ..State::default()
+        };
         Ok(format!("signature {sig}"))
     }
 
@@ -517,6 +534,9 @@ impl Runner {
         let proven = huginn.prove(&input, sp1_mode).await?;
         self.log(id, format!("  verified; public values = native output ({} bytes)", proven.public_values.len()));
         self.log(id, format!("  program key {}", proven.program_vkey));
+        if let Some(deployed) = &self.state.program_vkey {
+            ensure!(deployed == &proven.program_vkey, "the light client was deployed for program {deployed}, this proof is for {}: run deploy again", proven.program_vkey);
+        }
         let file = self.settings.evm_dir.join("proofs/proof.json");
         let mut summary = proven.summary(&sig);
         summary["mode"] = mode.as_str().into();
@@ -525,7 +545,6 @@ impl Runner {
         self.state.prove_secs = Some(proven.prove_secs);
         self.state.proof_mode = Some(mode);
         self.state.proof_file = Some(file);
-        self.state.program_vkey = Some(proven.program_vkey);
         Ok(format!("{} proof in {:.1}s, {} cycles", mode.as_str(), proven.prove_secs, e.total_cycles))
     }
 
@@ -540,7 +559,7 @@ impl Runner {
             self.state.chain_id = Some(chain);
             return Ok(format!("chain {chain} at {rpc}"));
         }
-        ensure!(self.settings.is_local_evm(), "no chain at {rpc}");
+        ensure!(self.settings.rpc_is_this_machine(), "no chain at {rpc}");
         self.log(id, "$ anvil --silent   (nothing at the default RPC; starting one)");
         // Left running after huginn-evm exits, so later commands reach the same chain.
         // Stop it with `pkill anvil`.
@@ -557,9 +576,18 @@ impl Runner {
         bail!("anvil did not start")
     }
 
-    fn forge_env(&self) -> Result<Vec<(String, String)>> {
+    /// The EVM chain's id, asked from the chain itself.
+    async fn chain_id(&self, id: StepId) -> Result<u64> {
+        let rpc = self.settings.evm_rpc();
+        let out = self.cmd(id, "cast", &["chain-id", "--rpc-url", &rpc], None, &[], true).await.with_context(|| format!("no EVM chain at {rpc}"))?;
+        Ok(out.trim().parse()?)
+    }
+
+    /// The environment forge scripts read. The key travels here, never on a command line.
+    async fn forge_env(&self, id: StepId) -> Result<Vec<(String, String)>> {
         let mut env: Vec<(String, String)> = self.settings.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        env.push(("PRIVATE_KEY".into(), self.settings.private_key().context("set PRIVATE_KEY in .env for a non-local chain")?));
+        let chain = self.chain_id(id).await?;
+        env.push(("PRIVATE_KEY".into(), self.settings.private_key(chain)?));
         env.push(("RPC_URL".into(), self.settings.evm_rpc()));
         if let Some(vkey) = &self.state.program_vkey {
             env.push(("PROGRAM_VKEY".into(), vkey.clone()));
@@ -573,7 +601,13 @@ impl Runner {
 
     async fn deploy(&mut self) -> Result<String> {
         let id = StepId::Deploy;
-        let mut env = self.forge_env()?;
+        // The program key depends only on the program, not on a proof: compute it now.
+        self.log(id, "huginn.program_vkey()  (the SP1 program's fingerprint; no proof needed)");
+        std::env::set_var("SP1_PROVER", "mock");
+        let vkey = Huginn::from_env().await.program_vkey().await?;
+        self.log(id, format!("  {vkey}"));
+        self.state.program_vkey = Some(vkey);
+        let mut env = self.forge_env(id).await?;
         // A real Groth16 proof on anvil needs SP1's real verifier, not the stand-in.
         if self.settings.mode == ProofMode::Groth16 {
             env.push(("LOCAL_VERIFIER".into(), "groth16".into()));
@@ -587,6 +621,7 @@ impl Runner {
             .map(|a| a.trim().to_string())
             .context("no SolanaLightClient address in forge's output")?;
         self.state.client = Some(client.clone());
+        self.state.submit_gas = None;
         self.state.verified = None;
         self.state.greeter = None;
         self.state.greeting = None;
@@ -598,7 +633,7 @@ impl Runner {
         let id = StepId::Submit;
         ensure!(self.state.client.is_some(), "deploy first");
         ensure!(self.state.proof_file.is_some(), "prove first");
-        let env = self.forge_env()?;
+        let env = self.forge_env(id).await?;
         let rpc = self.settings.evm_rpc();
         let dir = self.settings.evm_dir.clone();
         let out = self.forge(id, "script/Submit.s.sol", &rpc, &dir, &env).await?;
@@ -662,7 +697,7 @@ impl Runner {
         let key = bs58::decode(address.trim()).into_vec()?;
         ensure!(key.len() == 32, "solana address is not 32 bytes");
         self.log(id, format!("  controller = your Solana key, 0x{}", hex::encode(&key)));
-        let mut env = self.forge_env()?;
+        let mut env = self.forge_env(id).await?;
         env.push(("SOLANA_CONTROLLER".into(), format!("0x{}", hex::encode(&key))));
         let rpc = self.settings.evm_rpc();
         let dir = self.settings.evm_dir.clone();
@@ -685,17 +720,12 @@ impl Runner {
         let file = self.state.proof_file.clone().context("prove first")?;
         let rpc = self.settings.evm_rpc();
         let (pv, proof) = self.proof_bytes(id, &client, &file).await?;
-        let key = self.settings.private_key().context("PRIVATE_KEY")?;
-        self.cmd(
-            id,
-            "cast",
-            &["send", &greeter, "execute(bytes,bytes)", &format!("0x{}", hex::encode(&pv)), &format!("0x{}", hex::encode(&proof)), "--private-key", &key, "--rpc-url", &rpc],
-            None,
-            &[],
-            true,
-        )
-        .await?;
-        self.log(id, format!("$ cast send {} execute(bytes,bytes) <public values> <proof>", shorten_addr(&greeter)));
+        let mut env = self.forge_env(id).await?;
+        env.push(("GREETER".into(), greeter.clone()));
+        env.push(("PUBLIC_VALUES".into(), format!("0x{}", hex::encode(&pv))));
+        env.push(("PROOF".into(), format!("0x{}", hex::encode(&proof))));
+        let dir = self.settings.evm_dir.clone();
+        self.forge(id, "script/Execute.s.sol", &rpc, &dir, &env).await?;
         let greeting = self.cmd(id, "cast", &["call", &greeter, "greeting()(string)", "--rpc-url", &rpc], None, &[], false).await?;
         let greeting = unquote(&greeting);
         self.state.greeting = Some(greeting.clone());
@@ -807,10 +837,6 @@ impl Runner {
 
 fn unquote(s: &str) -> String {
     s.trim().trim_matches('"').to_string()
-}
-
-fn shorten_addr(a: &str) -> String {
-    if a.len() > 12 { format!("{}…{}", &a[..6], &a[a.len() - 4..]) } else { a.to_string() }
 }
 
 fn state_file(settings: &Settings) -> PathBuf {

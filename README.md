@@ -23,13 +23,13 @@ cd app && cargo build --release && cd ..
 ./app/target/release/huginn-evm
 ```
 
-Type a message, press enter, and watch it travel through four stages:
+Type a message, press enter, and watch it travel through five stages:
 
 ```
-✓ Send ───── ✓ Finalize ───── ⠋ Prove ───── ○ Verify
+✓ Set up ─── ✓ Send ─── ✓ Finalize ─── ⠋ Prove ─── ○ Verify
 ```
 
-Underneath, plain sentences say what's happening and what happened. A result card at the end says whether the contract trusts your message.
+Underneath, plain sentences say what's happening and what happened. A result card at the end says what was really shown: a practice run proves nothing, a real STARK is checked on your machine, and only a Groth16 proof is checked by the contract.
 
 | Key | Does |
 |---|---|
@@ -84,7 +84,7 @@ You need:
 - Docker, only for Groth16 proofs made on your own machine.
 
 ```bash
-cp .env.example .env          # optional on anvil: an empty PRIVATE_KEY uses anvil's test key
+cp .env.example .env          # optional on anvil: an empty PRIVATE_KEY uses anvil's test key (chain 31337 only)
 forge install foundry-rs/forge-std --no-git
 forge test -vv
 ```
@@ -97,8 +97,9 @@ forge test -vv
 
 ## Status (2026-11-04)
 
-- 26 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
-  transaction parser, and the Solana-controlled greeter.
+- 39 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
+  transaction parser, the Solana-controlled greeter, and the outside review's attacks
+  (`test/Adversarial.t.sol`: fixed ones assert the attack fails, open ones still show it).
 - The full TUI flow runs on fresh transactions in ~10 s with practice proofs, and end to end
   with a real STARK proof (~5 min).
   - The steps: send, finalize, fetch, prove, deploy, submit, `isVerified` true.
@@ -115,7 +116,17 @@ forge test -vv
 
 ## Using it from your contract
 
-The easiest way is to inherit `SolanaControlled` (see `src/examples/SolanaGreeter.sol`) and implement `_execute(command)`. Or use the pieces directly:
+The easiest way is to inherit `SolanaControlled` (see `src/examples/SolanaGreeter.sol`) and implement `_execute(command)`. The controller then sends a Solana memo
+
+```
+huginn:<chain id>:<your contract's address>:<nonce>:<command>
+```
+
+where `<nonce>` is the contract's `nonce() + 1` (`memoPrefix()` returns everything before the nonce). Commands run once each, in order, only on that chain and that deployment. An empty command cancels a signed command that was never relayed.
+
+**A failed Solana transaction still runs its command.** The proof shows the transaction is in a finalized block, not that it succeeded. That's right for "the controller signed this", and wrong for anything that depends on the Solana side happening (a payment, a burn): don't build those on `SolanaControlled`.
+
+Or use the pieces directly:
 
 ```solidity
 import {SolanaLightClient} from "huginn-evm/SolanaLightClient.sol";
