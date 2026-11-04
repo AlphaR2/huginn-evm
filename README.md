@@ -39,6 +39,7 @@ Each step shows the exact command it ran and that command's output.
 | `enter` | run every step |
 | `r` / `n` | run the selected step / from it to the end |
 | `m` | proof mode: `mock` (seconds), `compressed` (real STARK, ~5 min), `groth16` (real, for real chains) |
+| `s` | certificate source: `shreds` (the next block's footer; no plugin needed) or `plugin` (footer-dump) |
 | `e` | edit the memo |
 | `↑↓`, `J/K` | select a step, scroll its log |
 
@@ -74,9 +75,10 @@ docs/demo.md                the demo, step by step, with what you should see
 You need:
 - [Foundry](https://getfoundry.sh), Rust, the SP1 toolchain (`sp1up`) and `protoc`;
 - the Solana CLI (Agave 4.4, for `solana-test-validator --alpenglow`);
-- huginn checked out next to this repo (`../huginn`), with its validator running with the
-  footer-dump plugin and `ledger-dump` built (see huginn's README). Or switch `app/Cargo.toml`
-  to huginn's git dependency;
+- huginn checked out next to this repo (`../huginn`), with its local Alpenglow validator
+  running and `ledger-dump` built (see huginn's README). The footer-dump plugin is optional:
+  certificates are read from the shreds by default. Or switch `app/Cargo.toml` to huginn's
+  git dependency;
 - Docker, only for Groth16 proofs made on your own machine.
 
 ```bash

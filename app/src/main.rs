@@ -30,6 +30,9 @@ struct Cli {
     /// Proof mode: mock (seconds), compressed (real STARK), groth16 (real, for real chains).
     #[arg(long, global = true, default_value = "mock")]
     mode: String,
+    /// Where certificates come from: shreds (the next block's footer) or plugin (footer-dump).
+    #[arg(long, global = true, default_value = "shreds")]
+    certs: String,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -53,6 +56,7 @@ fn main() -> Result<()> {
     let mut settings = Settings::load(evm_dir, cli.huginn)?;
     settings.memo = cli.memo;
     settings.mode = ProofMode::parse(&cli.mode)?;
+    settings.certs = steps::CertSource::parse(&cli.certs)?;
 
     match cli.command {
         None => tui::run(settings),

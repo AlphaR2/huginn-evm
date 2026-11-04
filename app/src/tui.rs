@@ -145,6 +145,7 @@ impl App {
             let mut r = runner.lock().await;
             r.settings.memo = settings.memo;
             r.settings.mode = settings.mode;
+            r.settings.certs = settings.certs;
             for id in ids {
                 if !r.run(id).await {
                     break;
@@ -211,6 +212,7 @@ impl App {
                 self.start(StepId::ALL[from..].to_vec(), rt, runner);
             }
             KeyCode::Char('m') if !self.busy => self.settings.mode = self.settings.mode.next(),
+            KeyCode::Char('s') if !self.busy => self.settings.certs = self.settings.certs.next(),
             KeyCode::Char('e') if !self.busy => self.editing = Some(self.settings.memo.clone()),
             _ => {}
         }
@@ -396,7 +398,7 @@ impl App {
             Span::styled(self.settings.mode.as_str(), Style::new().fg(Color::Yellow).bold()),
             Span::styled(format!(" ({mode_note})"), Style::new().fg(DIM)),
             Span::styled("   source ", Style::new().fg(DIM)),
-            Span::raw("local-ledger"),
+            Span::raw(format!("ledger, certs from {}", self.settings.certs.as_str())),
             Span::styled("   evm ", Style::new().fg(DIM)),
             Span::raw(self.settings.evm_rpc()),
         ]);
@@ -407,7 +409,7 @@ impl App {
         let keys: &[(&str, &str)] = if self.editing.is_some() {
             &[("enter", "save memo"), ("esc", "cancel")]
         } else {
-            &[("enter", "run all"), ("r", "run step"), ("n", "run from here"), ("m", "proof mode"), ("e", "edit memo"), ("↑↓", "select"), ("J/K", "scroll log"), ("q", "quit")]
+            &[("enter", "run all"), ("r", "run step"), ("n", "run from here"), ("m", "proof mode"), ("s", "cert source"), ("e", "edit memo"), ("↑↓", "select"), ("J/K", "scroll log"), ("q", "quit")]
         };
         let mut spans = vec![Span::raw(" ")];
         for (k, v) in keys {

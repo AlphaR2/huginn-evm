@@ -98,7 +98,7 @@ impl StepId {
             StepId::Doctor => "Looks for every tool the flow needs (Solana CLI and validator, ledger-dump, Foundry, Docker for Groth16) and says what is missing.",
             StepId::Send => "Sends a small SOL transfer with your memo on the local Alpenglow chain, using the Solana CLI's default keypair.",
             StepId::Finalize => "Polls the validator until the transaction's block is finalized, and notes whether the transaction itself succeeded (inclusion is not success).",
-            StepId::Fetch => "ledger-dump reads the block's shreds from the validator's ledger, finds the certificate that finalized it, checks both, and rebuilds the block_id.",
+            StepId::Fetch => "ledger-dump reads the block's shreds from the validator's ledger and the certificate that finalized it (in the next block's footer, or from the plugin), checks both, and rebuilds the block_id.",
             StepId::Prove => "Runs Huginn's SP1 program: checks the BLS certificate and the stake threshold, rebuilds the block_id, finds the transaction, and proves all of it.",
             StepId::Anvil => "Uses the EVM chain at RPC_URL; starts a local anvil if it is the default and nothing is running.",
             StepId::Deploy => "forge runs script/Deploy.s.sol: SolanaLightClient, pinned to Huginn's program key, this cluster's shred version, and epoch 0's validator set hash.",
@@ -156,6 +156,36 @@ impl ProofMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertSource {
+    Shreds,
+    Plugin,
+}
+
+impl CertSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CertSource::Shreds => "shreds",
+            CertSource::Plugin => "plugin",
+        }
+    }
+
+    pub fn next(self) -> CertSource {
+        match self {
+            CertSource::Shreds => CertSource::Plugin,
+            CertSource::Plugin => CertSource::Shreds,
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<CertSource> {
+        Ok(match s {
+            "shreds" => CertSource::Shreds,
+            "plugin" => CertSource::Plugin,
+            _ => bail!("certificate source is shreds or plugin"),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Settings {
     /// The huginn checkout (ledger-dump, the validator's ledger and footers).
@@ -165,6 +195,9 @@ pub struct Settings {
     pub solana_rpc: String,
     pub memo: String,
     pub mode: ProofMode,
+    /// Where certificates come from: the shreds' own footers (default) or the footer-dump
+    /// plugin's output. Shreds always come from the validator's ledger.
+    pub certs: CertSource,
     /// `.env` merged over `.env.example`.
     pub env: HashMap<String, String>,
 }
@@ -187,6 +220,7 @@ impl Settings {
             solana_rpc: std::env::var("SOLANA_RPC").unwrap_or_else(|_| "http://127.0.0.1:8899".into()),
             memo: "hello from solana".into(),
             mode: ProofMode::Mock,
+            certs: CertSource::Shreds,
             env,
         })
     }
@@ -324,11 +358,13 @@ impl Runner {
             }
         }
         let footers = self.settings.huginn_dir.join("fixtures/local/footers.jsonl");
-        if footers.exists() {
-            self.log(id, "✓ footer-dump plugin output found (finality certificates)");
-        } else {
-            self.log(id, "✗ no footers.jsonl: start the validator with the footer-dump plugin");
-            missing.push("footers");
+        match (self.settings.certs, footers.exists()) {
+            (CertSource::Shreds, _) => self.log(id, "✓ certificates come from the shreds' footers (no plugin needed)"),
+            (CertSource::Plugin, true) => self.log(id, "✓ footer-dump plugin output found (certificates)"),
+            (CertSource::Plugin, false) => {
+                self.log(id, "✗ no footers.jsonl: start the validator with the footer-dump plugin, or use certs from shreds");
+                missing.push("footers");
+            }
         }
         if self.cmd(id, "docker", &["info"], None, &[], true).await.is_ok() {
             self.log(id, "✓ docker   running (needed only for groth16)");
@@ -407,11 +443,12 @@ impl Runner {
         let slot_s = slot.to_string();
         let out_s = out_dir.display().to_string();
         let huginn = self.settings.huginn_dir.clone();
+        let certs = self.settings.certs.as_str();
         // The certificate for slot S travels in a later block's footer, so it can take a
         // few slots to appear.
         let mut last_err = None;
         for attempt in 0..10 {
-            match self.cmd(id, dump.to_str().unwrap(), &["--slot", &slot_s, "--out", &out_s], Some(&huginn), &[], attempt > 0).await {
+            match self.cmd(id, dump.to_str().unwrap(), &["--slot", &slot_s, "--certs", certs, "--out", &out_s], Some(&huginn), &[], attempt > 0).await {
                 Ok(out) => {
                     if let Some(line) = out.lines().find(|l| l.contains("data +")) {
                         self.state.shreds = Some(line.split(':').nth(1).unwrap_or("").split(',').next().unwrap_or("").trim().into());

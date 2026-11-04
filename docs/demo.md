@@ -10,12 +10,13 @@ What you show:
 
 In `huginn`, three things:
 
-**1. Start the local Alpenglow validator with the certificate plugin**, and leave it running:
+**1. Start the local Alpenglow validator**, and leave it running:
 
 ```bash
-solana-test-validator --alpenglow --ledger .local-ledger \
-  --geyser-plugin-config plugins/footer-dump/config.json
+solana-test-validator --alpenglow --ledger .local-ledger
 ```
+
+The footer-dump plugin is optional: certificates are read from the shreds. To also show the plugin source (`s` in the TUI), add `--geyser-plugin-config plugins/footer-dump/config.json`.
 
 **2. Build ledger-dump**, once:
 
@@ -43,7 +44,7 @@ Press `e` and type a memo, e.g. `gm from solana`, then `enter`. Press `enter` ag
 | 1 | Check tools | ✓ for solana, forge, cast, anvil, ledger-dump, validator, footers. `!` for Docker/circuits is fine in mock mode |
 | 2 | Send memo on Solana | `$ solana transfer … --with-memo "gm from solana"`, then the signature |
 | 3 | Wait for finality | `finalized in slot N` |
-| 4 | Fetch certificate + shreds | `certs for N and N-1 verify`, `computed block_id` equal to `certified block_id`, `MATCH` |
+| 4 | Fetch certificate + shreds | `certs for N and N-1 verify (… from the shreds' footers)`, `computed block_id` equal to `certified block_id`, `MATCH` |
 | 5 | Prove with SP1 | 1 validator, 32 shreds; ~5.1M cycles (3.9M finality, 0.6M inclusion); program key `0x000482e7…` |
 | 6 | Start EVM chain | anvil, chain 31337 |
 | 7 | Deploy light client | the `SolanaLightClient` address |
@@ -60,6 +61,7 @@ The three boxes at the top fill in as you go: Solana (tx, slot, finalized), proo
   - that they hold over 80% of the stake (fast path);
   - the block_id rebuilt from the shreds;
   - the transaction's bytes inside the block.
+- **No special infrastructure.** The certificate that finalized block N is inside block N+1's footer. So the shreds are all Huginn needs: no plugin and no paid feed.
 - **Mock vs real.** In mock mode SP1 runs the same program but makes no proof. Press `m` for `compressed`: a real STARK proof, ~5 minutes on a laptop. Real chains take `groth16`: ~260 bytes, ~270k gas to verify on Base.
 - **Inclusion is not success.** A failed Solana transaction is in its block too. Step 3 says if it failed; the contract sees the raw transaction.
 - **Today's trust gap.** The client's owner stores each epoch's validator set hash. Proving the set handover from one epoch to the next is planned.
