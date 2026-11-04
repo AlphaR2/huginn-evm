@@ -8,3 +8,10 @@ interface ISP1Verifier {
     /// committed exactly `publicValues`.
     function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
+
+/// A verifier that names the circuit it checks (its hash's first 4 bytes prefix every proof).
+/// Same as sp1-contracts' `ISP1VerifierWithHash`; SP1's generated verifier implements it.
+interface ISP1VerifierWithHash is ISP1Verifier {
+    /// The hash of the verifier's circuit.
+    function VERIFIER_HASH() external pure returns (bytes32);
+}

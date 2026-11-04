@@ -455,7 +455,7 @@ impl App {
         let mode_note = match self.settings.mode {
             ProofMode::Mock => "seconds, no real proof",
             ProofMode::Compressed => "real STARK, ~5 min",
-            ProofMode::Groth16 => "real Groth16, Docker, needs SP1_VERIFIER",
+            ProofMode::Groth16 => "real Groth16, Docker",
         };
         let line = Line::from(vec![
             Span::styled(" memo ", Style::new().fg(DIM)),
@@ -688,7 +688,7 @@ impl App {
             k("m", &format!("proof: {}", mode_name(self.settings.mode))),
             Line::styled("         practice: seconds; SP1 runs every check but makes no real proof", Style::new().fg(DIM)),
             Line::styled("         real (STARK): ~5 minutes on a laptop", Style::new().fg(DIM)),
-            Line::styled("         real (Groth16): what real chains take; needs Docker + SP1_VERIFIER", Style::new().fg(DIM)),
+            Line::styled("         real (Groth16): what real chains take; ~10+ min, needs Docker", Style::new().fg(DIM)),
             k("s", &format!("validators' signatures from: {}", match self.settings.certs {
                 crate::steps::CertSource::Shreds => "the next block (no plugin needed)",
                 crate::steps::CertSource::Plugin => "the footer-dump plugin",

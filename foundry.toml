@@ -13,3 +13,5 @@ fs_permissions = [{ access = "read", path = "./test/fixtures" }, { access = "rea
 [lint]
 # SolanaTx is a parser: reverting inside its loops on malformed input is the point.
 exclude_lints = ["require-revert-in-loop"]
+# Vendored from SP1, kept byte-identical.
+ignore = ["src/sp1/**"]

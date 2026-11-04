@@ -573,7 +573,11 @@ impl Runner {
 
     async fn deploy(&mut self) -> Result<String> {
         let id = StepId::Deploy;
-        let env = self.forge_env()?;
+        let mut env = self.forge_env()?;
+        // A real Groth16 proof on anvil needs SP1's real verifier, not the stand-in.
+        if self.settings.mode == ProofMode::Groth16 {
+            env.push(("LOCAL_VERIFIER".into(), "groth16".into()));
+        }
         let rpc = self.settings.evm_rpc();
         let dir = self.settings.evm_dir.clone();
         let out = self.forge(id, "script/Deploy.s.sol", &rpc, &dir, &env).await?;
@@ -594,9 +598,6 @@ impl Runner {
         let id = StepId::Submit;
         ensure!(self.state.client.is_some(), "deploy first");
         ensure!(self.state.proof_file.is_some(), "prove first");
-        if self.state.proof_mode == Some(ProofMode::Groth16) && self.settings.env.get("SP1_VERIFIER").is_none_or(|v| v.is_empty()) {
-            bail!("a groth16 proof needs SP1's real verifier: set SP1_VERIFIER (anvil's stand-in only takes mock/compressed)");
-        }
         let env = self.forge_env()?;
         let rpc = self.settings.evm_rpc();
         let dir = self.settings.evm_dir.clone();

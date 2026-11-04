@@ -5,18 +5,26 @@ import {Script, console} from "forge-std/Script.sol";
 import {ISP1Verifier} from "../src/ISP1Verifier.sol";
 import {SolanaLightClient} from "../src/SolanaLightClient.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
+import {SP1Verifier} from "../src/sp1/SP1VerifierGroth16.sol";
 
 /// forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast
-/// Settings come from .env (see .env.example).
+/// Settings come from .env (see .env.example). With no SP1_VERIFIER, on anvil only:
+///   LOCAL_VERIFIER=groth16 deploys SP1's real Groth16 verifier (src/sp1), for real proofs;
+///   otherwise the stand-in (src/mocks), for practice and STARK proofs.
 contract Deploy is Script {
     function run() external returns (SolanaLightClient client) {
         address verifier = vm.envOr("SP1_VERIFIER", address(0));
         uint256 key = vm.envUint("PRIVATE_KEY");
         vm.startBroadcast(key);
         if (verifier == address(0)) {
-            require(block.chainid == 31337, "set SP1_VERIFIER: the stand-in verifier is for anvil only");
-            verifier = address(new BindingVerifier());
-            console.log("stand-in verifier (local only):", verifier);
+            require(block.chainid == 31337, "set SP1_VERIFIER: local verifiers are for anvil only");
+            if (keccak256(bytes(vm.envOr("LOCAL_VERIFIER", string("")))) == keccak256("groth16")) {
+                verifier = address(new SP1Verifier());
+                console.log("SP1 Groth16 verifier v6.1.0 (local):", verifier);
+            } else {
+                verifier = address(new BindingVerifier());
+                console.log("stand-in verifier (local only):", verifier);
+            }
         }
         client = new SolanaLightClient(
             ISP1Verifier(verifier),
