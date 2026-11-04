@@ -27,7 +27,7 @@ cargo build --release -p ledger-dump
 
 **3. Make sure the validator set file exists for the current epoch.** Epoch 0 is already in `fixtures/local`.
 
-Then in `hugin-evm`:
+Then in `huginn-evm`:
 
 ```bash
 cd app && cargo build --release && cd ..

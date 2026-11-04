@@ -51,7 +51,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let evm_dir = std::env::current_dir()?;
     if !evm_dir.join("script/Deploy.s.sol").exists() {
-        bail!("run huginn-evm from the hugin-evm repo (it needs .env and script/)");
+        bail!("run huginn-evm from the huginn-evm repo (it needs .env and script/)");
     }
     let mut settings = Settings::load(evm_dir, cli.huginn)?;
     settings.memo = cli.memo;

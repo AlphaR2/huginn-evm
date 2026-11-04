@@ -1,4 +1,4 @@
-# hugin-evm codebase guide
+# huginn-evm codebase guide
 
 What every file does, in the order it's worth reading. huginn has its own guide (`../huginn/docs/codebase.md`) for the Solana side and the proof.
 

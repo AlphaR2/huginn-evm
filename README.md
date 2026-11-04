@@ -1,4 +1,4 @@
-# hugin-evm
+# huginn-evm
 
 Use Solana transactions inside EVM contracts (Base first, any EVM chain the same way), with
 proofs made by [huginn](https://github.com/AlphaR2/huginn).
@@ -8,7 +8,7 @@ Alpenglow validators finalized"*, as one SP1 proof with a fixed-layout output. T
 one **destination** for those proofs:
 
 ```
-huginn (dependency)                      hugin-evm (this repo)
+huginn (dependency)                      huginn-evm (this repo)
 ────────────────────                     ──────────────────────────────────────────────
 huginn-prover crate  ──▶ app/ (huginn-evm) ──▶ script/Deploy, Submit ──▶ SolanaLightClient
   (SP1 program,          TUI + subcommands:      forge sends to             checks the proof,
@@ -118,9 +118,9 @@ forge test -vv
 The easiest way is to inherit `SolanaControlled` (see `src/examples/SolanaGreeter.sol`) and implement `_execute(command)`. Or use the pieces directly:
 
 ```solidity
-import {SolanaLightClient} from "hugin-evm/SolanaLightClient.sol";
-import {HuginnOutput} from "hugin-evm/HuginnOutput.sol";
-import {SolanaTx} from "hugin-evm/SolanaTx.sol";
+import {SolanaLightClient} from "huginn-evm/SolanaLightClient.sol";
+import {HuginnOutput} from "huginn-evm/HuginnOutput.sol";
+import {SolanaTx} from "huginn-evm/SolanaTx.sol";
 
 function act(bytes calldata output, bytes calldata proof) external {
     HuginnOutput.Output memory o = huginn.verify(output, proof);   // final + included, or revert
@@ -138,4 +138,3 @@ function act(bytes calldata output, bytes calldata proof) external {
   epoch). Until set rotation is proven, the owner is trusted for that.
 - **Inclusion is not success.** Failed Solana transactions are in blocks too. Check what your
   contract needs from the transaction itself.
-# huginn-evm
