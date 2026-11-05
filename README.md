@@ -73,20 +73,11 @@ docs/codebase.md            every file explained, in reading order
 
 ## Setup
 
-You need:
-- [Foundry](https://getfoundry.sh), Rust, the SP1 toolchain (`sp1up`) and `protoc`;
-- the Solana CLI (Agave 4.4, for `solana-test-validator --alpenglow`);
-- huginn checked out next to this repo (`../huginn`; step by step in huginn's
-  [`docs/run.md`](https://github.com/AlphaR2/huginn/blob/main/docs/run.md)), with its local Alpenglow validator
-  running and `ledger-dump` built (see huginn's README). The footer-dump plugin is optional:
-  certificates are read from the shreds by default. Or switch `app/Cargo.toml` to huginn's
-  git dependency;
-- Docker, only for Groth16 proofs made on your own machine.
+One guide for both repos: huginn's [`docs/run.md`](https://github.com/AlphaR2/huginn/blob/main/docs/run.md) part 1. It covers the tools (Rust, SP1, protoc, Solana CLI, Foundry), cloning huginn next to this repo, the local validator, the builds, `huginn-evm run doctor` and the TUI. Just the contract tests:
 
 ```bash
-cp .env.example .env          # optional on anvil: an empty PRIVATE_KEY uses anvil's test key (chain 31337 only)
 forge install foundry-rs/forge-std --no-git
-forge test -vv
+forge test
 ```
 
 ## Run it on a real chain (Base Sepolia, Base, ...)

@@ -9,30 +9,13 @@ What you show:
 
 ## Before recording
 
-In `huginn`, three things:
-
-**1. Start the local Alpenglow validator**, and leave it running:
+Set up once with huginn's [`docs/run.md`](https://github.com/AlphaR2/huginn/blob/main/docs/run.md) part 1: the validator running, both repos built, and `./app/target/release/huginn-evm run doctor` all ✓. Then open the TUI from this repo:
 
 ```bash
-solana-test-validator --alpenglow --ledger .local-ledger
-```
-
-The footer-dump plugin is optional: certificates are read from the shreds. To also show the plugin source (`s` in the TUI), add `--geyser-plugin-config plugins/footer-dump/config.json`.
-
-**2. Build ledger-dump**, once:
-
-```bash
-cargo build --release -p ledger-dump
-```
-
-**3. Make sure the validator set file exists for the current epoch.** Epoch 0 is already in `fixtures/local`.
-
-Then in `huginn-evm`:
-
-```bash
-cd app && cargo build --release && cd ..
 ./app/target/release/huginn-evm
 ```
+
+To also show certificates coming from the footer-dump plugin (`s` in the TUI), start the validator with `--geyser-plugin-config plugins/footer-dump/config.json`. It's optional: by default they come from the shreds.
 
 Make the terminal at least 150 × 34 characters.
 

@@ -7,7 +7,7 @@ import {SolanaLightClient} from "../src/SolanaLightClient.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
 
 /// forge script script/Submit.s.sol --rpc-url $RPC_URL --broadcast
-/// Submits the proof in $PROOF_FILE (written by the relayer) to $HUGINN_CLIENT.
+/// Submits the proof in $PROOF_FILE (written by the app) to $HUGINN_CLIENT.
 contract Submit is Script {
     function run() external returns (HuginnOutput.Output memory out) {
         SolanaLightClient client = SolanaLightClient(vm.envAddress("HUGINN_CLIENT"));
