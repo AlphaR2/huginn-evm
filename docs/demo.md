@@ -52,7 +52,7 @@ To show what's under the hood, press `d` at any time: every step, the exact comm
 | 6 | Wait for finality | `finalized in slot N` |
 | 7 | Fetch certificate + shreds | `certs for N and N-1 verify (… from the shreds' footers)`, `computed block_id` equal to `certified block_id`, `MATCH` |
 | 8 | Prove with SP1 | 1 validator, 32 shreds; ~5.1M cycles (3.9M finality, 0.6M inclusion); the program key |
-| 9 | Submit proof | `verified Solana slot N` and the block_id; ~105k gas |
+| 9 | Submit proof | `verified Solana slot N` and the block_id; ~110k gas |
 | 10 | Ask the contract | `isVerified(signature) = true` |
 | 11 | Run the Solana command | `script/Execute.s.sol` hands the same proof to `SolanaGreeter.execute`; `nonce now 1`, greeting becomes your memo |
 | 12 | Forged proof rejected | the real output is accepted; the memo with one character changed gets `rejected: InvalidProof` |
@@ -77,7 +77,7 @@ In the details view, the three boxes at the top fill in as you go:
 - **Practice vs real.** A practice proof runs the same program in SP1 but makes no proof, and the local stand-in verifier accepts anyone's: it shows the flow works, it proves nothing. Press `m` for `real (STARK)`, ~5 minutes on a laptop. Real chains take `real (Groth16)`: ~260 bytes, ~270k gas to verify on Base.
 - **A Solana wallet controls an EVM contract.** `SolanaGreeter` acts only on transactions your Solana key signed. The memo names the chain, the contract's address and a nonce (`huginn:31337:0x9fe4…:1:…`). So it can't run on another chain or another deployment, and commands run once each, in order.
 - **Inclusion is not success.** A failed Solana transaction is in its block too. Step 6 says if it failed; the contract sees the raw transaction.
-- **Today's trust gap.** The client's owner stores each epoch's validator set hash. Proving the set handover from one epoch to the next is planned.
+- **Today's trust gap.** The client's owner stores each epoch's validator set hash. A new set waits a public delay before it counts, so a bad one can be seen and fixed first, but the owner is still trusted. Proving the set handover from one epoch to the next is planned.
 
 ## Without the TUI
 

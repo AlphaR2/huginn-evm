@@ -43,7 +43,7 @@ contract Groth16Test is Test {
     }
 
     function test_lightClientAcceptsRealProof() public withFixture {
-        SolanaLightClient client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, 432000, 0, SET_0);
+        SolanaLightClient client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, 432000, 0, SET_0, 0);
         uint256 before = gasleft();
         HuginnOutput.Output memory out = client.submit(pv, proof);
         emit log_named_uint("SolanaLightClient.submit gas, real Groth16", before - gasleft());

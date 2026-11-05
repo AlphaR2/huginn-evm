@@ -33,7 +33,7 @@ contract SolanaLightClientTest is Test {
         sig = vm.parseBytes(string.concat("0x", vm.parseJsonString(tx_, ".signature")));
 
         verifier = new BindingVerifier();
-        client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0);
+        client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0, 0);
     }
 
     function proofOf(bytes memory pv_) internal view returns (bytes memory) {
@@ -78,21 +78,21 @@ contract SolanaLightClientTest is Test {
 
     function test_rejectsProofOfAnotherProgram() public {
         SolanaLightClient other =
-            new SolanaLightClient(verifier, keccak256("other program"), SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0);
+            new SolanaLightClient(verifier, keccak256("other program"), SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0, 0);
         bytes memory proof = proofOf(pv);
         vm.expectRevert(BindingVerifier.InvalidProof.selector);
         other.verify(pv, proof);
     }
 
     function test_rejectsOtherCluster() public {
-        SolanaLightClient mainnet = new SolanaLightClient(verifier, vkey, 50093, SLOTS_PER_EPOCH, 0, SET_0);
+        SolanaLightClient mainnet = new SolanaLightClient(verifier, vkey, 50093, SLOTS_PER_EPOCH, 0, SET_0, 0);
         bytes memory proof = proofOf(pv);
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.WrongShredVersion.selector, SHRED_VERSION));
         mainnet.verify(pv, proof);
     }
 
     function test_rejectsUnknownEpoch() public {
-        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 1, SET_0);
+        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 1, SET_0, 0);
         bytes memory proof = proofOf(pv);
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.UnknownEpoch.selector, 0));
         c.verify(pv, proof);
@@ -100,7 +100,7 @@ contract SolanaLightClientTest is Test {
 
     function test_rejectsWrongValidatorSet() public {
         bytes32 otherSet = keccak256("another set");
-        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, otherSet);
+        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, otherSet, 0);
         bytes memory proof = proofOf(pv);
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.WrongValidatorSet.selector, SET_0, otherSet));
         c.verify(pv, proof);
@@ -117,18 +117,85 @@ contract SolanaLightClientTest is Test {
         client.submit(other, proof);
     }
 
-    function test_onlyOwnerStoresSets_writeOnce() public {
+    function test_onlyOwnerProposesSets() public {
         vm.prank(address(0xbad));
         vm.expectRevert(SolanaLightClient.NotOwner.selector);
-        client.storeValidatorSet(1, keccak256("set 1"));
+        client.proposeValidatorSet(1, keccak256("set 1"));
+        vm.expectRevert(SolanaLightClient.ZeroSet.selector);
+        client.proposeValidatorSet(1, bytes32(0));
+    }
 
-        client.storeValidatorSet(1, keccak256("set 1"));
-        assertEq(client.validatorSetHash(1), keccak256("set 1"));
-        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.SetAlreadyStored.selector, 1));
-        client.storeValidatorSet(1, keccak256("rewrite"));
+    function test_proposedSetCountsOnlyAfterTheDelay() public {
+        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0, 1 days);
+        bytes32 set1 = keccak256("set 1");
+        c.proposeValidatorSet(1, set1);
+        (bytes32 pending, uint64 activeAt) = c.pendingSet(1);
+        assertEq(pending, set1);
+        assertEq(activeAt, block.timestamp + 1 days);
+        assertEq(c.validatorSetHash(1), bytes32(0), "not yet");
+        vm.warp(activeAt - 1);
+        assertEq(c.validatorSetHash(1), bytes32(0), "one second early");
+        vm.warp(activeAt);
+        assertEq(c.validatorSetHash(1), set1);
+        c.settleValidatorSet(1);
+        assertEq(c.validatorSetHash(1), set1);
+        (pending,) = c.pendingSet(1);
+        assertEq(pending, bytes32(0), "settled into the set in force");
+    }
 
-        vm.expectRevert(SolanaLightClient.ZeroOwner.selector);
-        client.setOwner(address(0));
+    function test_typoIsReplacedOrCancelledBeforeItCounts() public {
+        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0, 1 days);
+        c.proposeValidatorSet(1, keccak256("typo"));
+        vm.warp(block.timestamp + 12 hours);
+        c.proposeValidatorSet(1, keccak256("right")); // replaces it, the wait restarts
+        vm.warp(block.timestamp + 1 days);
+        assertEq(c.validatorSetHash(1), keccak256("right"));
+
+        c.proposeValidatorSet(2, keccak256("not needed"));
+        c.cancelValidatorSet(2);
+        vm.warp(block.timestamp + 2 days);
+        assertEq(c.validatorSetHash(2), bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.NothingPending.selector, uint64(2)));
+        c.cancelValidatorSet(2);
+    }
+
+    function test_setInForceIsSupersededOnlyAfterTheDelay() public {
+        SolanaLightClient c = new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, SET_0, 1 days);
+        c.verify(pv, proofOf(pv));
+        bytes32 newSet = keccak256("epoch 0, corrected");
+        c.proposeValidatorSet(0, newSet);
+        // The old set stays in force while the new one waits.
+        assertEq(c.validatorSetHash(0), SET_0);
+        c.verify(pv, proofOf(pv));
+        vm.warp(block.timestamp + 1 days);
+        assertEq(c.validatorSetHash(0), newSet);
+        bytes memory proof = proofOf(pv);
+        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.WrongValidatorSet.selector, SET_0, newSet));
+        c.verify(pv, proof);
+        // A matured proposal can no longer be cancelled: it is in force.
+        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.NothingPending.selector, uint64(0)));
+        c.cancelValidatorSet(0);
+    }
+
+    function test_ownershipMovesInTwoSteps() public {
+        address next = address(0xbeef);
+        client.transferOwnership(address(0xdead)); // a typo: nothing changes yet
+        assertEq(client.owner(), address(this));
+        client.transferOwnership(next); // corrected
+        vm.prank(address(0xdead));
+        vm.expectRevert(SolanaLightClient.NotPendingOwner.selector);
+        client.acceptOwnership();
+        vm.prank(next);
+        client.acceptOwnership();
+        assertEq(client.owner(), next);
+        assertEq(client.pendingOwner(), address(0));
+        vm.expectRevert(SolanaLightClient.NotOwner.selector);
+        client.proposeValidatorSet(1, keccak256("set 1"));
+    }
+
+    function test_constructorRefusesZeroSet() public {
+        vm.expectRevert(SolanaLightClient.ZeroSet.selector);
+        new SolanaLightClient(verifier, vkey, SHRED_VERSION, SLOTS_PER_EPOCH, 0, bytes32(0), 0);
     }
 
     function test_decodeRejectsBadFraming() public {

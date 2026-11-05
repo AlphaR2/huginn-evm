@@ -24,7 +24,7 @@ contract SolanaGreeterTest is Test {
 
     function setUp() public {
         verifier = new BindingVerifier();
-        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0);
+        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0);
         greeter = new SolanaGreeter(client, CONTROLLER);
     }
 

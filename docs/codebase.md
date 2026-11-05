@@ -30,7 +30,7 @@ This repo is the right-hand column, plus the app (`app/`) that drives all three 
 
 The contracts add three checks: the proof is from **our** program, from **this** Solana cluster, and against **the stored** validator set for that epoch.
 
-**What you must trust today.** The owner stores each epoch's validator set hash.
+**What you must trust today.** The owner stores each epoch's validator set hash. A new set waits a public delay before it counts, and ownership moves in two steps, but an owner who proposes a fake set and waits can still prove anything. Use a multisig owner.
 
 ---
 
@@ -85,8 +85,14 @@ The proof's output is plain bytes at fixed offsets, the same layout huginn's `Tx
 `decode` checks the version byte and that the length is exact, then reads the fields. It's not Solidity ABI on purpose: any chain can read this layout.
 
 ### `SolanaLightClient.sol`: the contract apps call
-- **Fixed at deploy:** the SP1 verifier, our program key, this cluster's shred version, and slots per epoch.
-- **Stored:** each epoch's validator set hash (owner-only, write-once per epoch), every finalized block seen (`slot → block_id`), and every transaction submitted (`keccak(signature) → slot`).
+- **Fixed at deploy:** the SP1 verifier, our program key, this cluster's shred version, slots per epoch, and `setDelay` (how long a proposed set waits).
+- **Stored:** each epoch's validator set hash, every finalized block seen (`slot → block_id`), and every transaction submitted (`keccak(signature) → slot`).
+- **Validator sets, owner-only, never instant:**
+  - `proposeValidatorSet(epoch, hash)` puts a set in `pendingSet` with `activeAt = now + setDelay`, and emits `ValidatorSetProposed`;
+  - before `activeAt`, proposing again replaces it (the wait restarts) and `cancelValidatorSet` withdraws it;
+  - from `activeAt` it counts. `validatorSetHash(epoch)` returns the set proofs must match: a matured proposal, else the set in force. `settleValidatorSet` records a matured one (optional, anyone);
+  - an epoch's set in force can be superseded the same way: the old one stays valid until the new one matures;
+  - the constructor's first set counts at once (like the program key, check it before relying on a client).
 - **`verify(output, proof)`** writes nothing. It:
   1. asks the SP1 verifier whether the proof is valid;
   2. decodes the output;
@@ -95,7 +101,7 @@ The proof's output is plain bytes at fixed offsets, the same layout huginn's `Tx
   5. refuses a block_id that differs from one already submitted for that slot (`ConflictingBlock`: that would mean Solana itself broke);
   6. returns the decoded output.
 - **`submit(output, proof)`** runs `verify`, then records the block and the transaction, so `isVerified(signature)` works later without a proof.
-- `setOwner(0)` is refused: without an owner, nobody could store the next epoch's set.
+- **Ownership** moves in two steps: `transferOwnership(to)` names a `pendingOwner`, and nothing changes until it calls `acceptOwnership()`. A typo is fixed by calling `transferOwnership` again.
 
 ### `SolanaTx.sol`: reading a Solana transaction
 The Solidity twin of huginn's `tx.rs`. `parse(raw)` reads legacy, v0 and v1 transactions (v1 is live on mainnet: message first, signatures last, no lookup tables) and returns signatures, header, account keys, blockhash, instructions and v0 lookups; `version` says which format. Helpers:
@@ -129,14 +135,14 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 
 ## 5. `test/`: what the contracts refuse
 
-44 tests (plus 5 Groth16 tests skipped until a real proof exists): `forge test -vv`.
+49 tests (plus 5 Groth16 tests skipped until a real proof exists): `forge test -vv`.
 
 | File | Covers |
 |---|---|
-| `SolanaLightClient.t.sol` | the **real** output of our proven memo transfer decodes field by field. Refused: one changed memo byte, another program's proof, another cluster, an unknown epoch, a wrong set, conflicting blocks, a non-owner storing sets, rewriting a set, a zero owner, bad framing. Plus a gas measurement |
+| `SolanaLightClient.t.sol` | the **real** output of our proven memo transfer decodes field by field. Refused: one changed memo byte, another program's proof, another cluster, an unknown epoch, a wrong set, conflicting blocks, a non-owner proposing sets, a zero set, bad framing. Sets count only after the delay, can be replaced or cancelled before, and superseded after; ownership moves in two steps. Plus a gas measurement |
 | `SolanaTx.t.sol` | the real transaction parsed exactly (0.5 SOL transfer + memo), and a v1 transaction written by Agave's SDK (`fixtures/tx_v1_agave.json`). Refused: every possible truncation, trailing bytes, non-canonical lengths, unknown versions, bad v1 config masks. v0 lookups parse. 256 random inputs never panic |
 | `SolanaGreeter.t.sol` | transactions built byte by byte. The controller changes the greeting. Refused: a stranger, a replay, commands out of order, malformed nonces, a memo for another chain, a memo for another deployment, a forged command. The address works in any letter case; an empty command cancels; a 200-byte command works |
-| `Adversarial.t.sol` | an outside review's attacks (huginn's `docs/adversarial-report.md`). `test_FIXED_*` assert a fixed attack now fails; `test_POC_*` still show an open one (the owner's power over validator sets) |
+| `Adversarial.t.sol` | an outside review's attacks (huginn's `docs/adversarial-report.md`). `test_FIXED_*` assert a fixed attack now fails; `test_POC_*` still show an open one (the owner can still forge with a fake set, but only after the public delay) |
 | `fixtures/` | copies of huginn's proven output and the transaction's RPC copy |
 
 ---
@@ -145,10 +151,11 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 
 | Script | Does |
 |---|---|
-| `Deploy.s.sol` | deploys `SolanaLightClient`; on anvil with no `SP1_VERIFIER`, first deploys the stand-in verifier |
+| `Deploy.s.sol` | deploys `SolanaLightClient` with `SET_DELAY` (unset: 0 on anvil, one day elsewhere); on anvil with no `SP1_VERIFIER`, first deploys the stand-in verifier |
 | `Submit.s.sol` | reads `PROOF_FILE` (`proofs/proof.json`) and calls `submit`. A proof with no on-chain bytes (practice/STARK) only works on anvil |
 | `DeployGreeter.s.sol` | deploys `SolanaGreeter` for `SOLANA_CONTROLLER` (a Solana public key as 32 bytes hex) |
 | `Execute.s.sol` | relays a proof to `GREETER`'s `execute` (`PUBLIC_VALUES`, `PROOF`) |
+| `ProposeValidatorSet.s.sol` | proposes `EPOCH`'s `VALIDATOR_SET_HASH` on `HUGINN_CLIENT` (owner only; counts after the delay) |
 
 Every script reads `PRIVATE_KEY` from the environment, never from a command-line argument (other users of the machine can see those).
 

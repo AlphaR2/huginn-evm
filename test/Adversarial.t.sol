@@ -15,7 +15,7 @@ import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
 /// The stand-in verifier lets the test mint a "proof" for any public values. That is the
 /// same power a real prover has over values it can legitimately prove, so each test only
 /// builds public values a real prover could obtain (a real Solana transaction in a real
-/// finalized block), except `ownerKeyForges...`, which uses the owner's trust power.
+/// finalized block), except `ownerKeyStillForges...`, which uses the owner's trust power.
 contract AdversarialTest is Test {
     uint16 constant SHRED_VERSION = 28090;
     bytes32 constant SET_0 = 0xb1f25236519c10b064498b6507ed0b87b88ad4df728a0a348e9434769d7d3c11;
@@ -29,7 +29,7 @@ contract AdversarialTest is Test {
 
     function setUp() public {
         verifier = new BindingVerifier();
-        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0);
+        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0);
         greeter = new SolanaGreeter(client, CONTROLLER);
     }
 
@@ -78,42 +78,47 @@ contract AdversarialTest is Test {
 
     // ---- F2: the validator-set owner is the root of trust ----------------------------------
 
-    /// The owner stores the set hash for each epoch. Owner can store the hash of a set whose
-    /// keys it controls, then prove any transaction, signed by anyone, finalized by that
-    /// fake "validator set". Every consumer, including SolanaControlled, accepts it.
-    function test_POC_ownerKeyForgesAnyControllerCommand() public {
+    /// STILL OPEN (real fix: prove the set handover in SP1). The owner can propose a set whose
+    /// keys it controls and then prove anything. What changed: the fake set waits a public
+    /// delay (`ValidatorSetProposed`, `pendingSet`) before it counts, so watchers and
+    /// consumers have that long to see it coming.
+    function test_POC_ownerKeyStillForges_butOnlyAfterAPublicDelay() public {
+        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days);
+        SolanaGreeter g = new SolanaGreeter(slow, CONTROLLER);
         bytes32 evilSet = keccak256("attacker's own validator set");
-        client.storeValidatorSet(1, evilSet); // this test contract is the owner
-        bytes memory forged = _memoTx(CONTROLLER, 9, _memo(greeter, 1, "owned by whoever holds the owner key"));
+        slow.proposeValidatorSet(1, evilSet); // this test contract is the owner
+        (bytes32 visible,) = slow.pendingSet(1);
+        assertEq(visible, evilSet, "anyone can see the pending set");
+
+        bytes memory forged = _memoTx(CONTROLLER, 9, _memo(g, 1, "owned by whoever holds the owner key"));
         bytes memory pv = _pv(forged, 432_001, evilSet, keccak256("a block that never existed"));
-        greeter.execute(pv, verifier.proofFor(VKEY, pv));
-        assertEq(greeter.greeting(), "owned by whoever holds the owner key");
+        bytes memory proof = verifier.proofFor(VKEY, pv);
+        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.UnknownEpoch.selector, uint64(1)));
+        g.execute(pv, proof);
+
+        vm.warp(block.timestamp + 1 days);
+        g.execute(pv, proof);
+        assertEq(g.greeting(), "owned by whoever holds the owner key");
     }
 
-    /// Write-once means a typo is permanent: that epoch can never be proven, and the
-    /// client's verifier, program key and every consumer's pointer to it are immutable, so
-    /// recovery is a redeploy of the client and all apps.
-    function test_POC_wrongSetForAnEpochBricksItForever() public {
+    /// FIXED. A wrong set no longer bricks an epoch: replaced before it counts, or superseded
+    /// (after the same delay) once it does.
+    function test_FIXED_wrongSetForAnEpochCanBeCorrected() public {
         bytes32 typo = keccak256("typo");
         bytes32 realSet1 = keccak256("the correct epoch 1 set");
-        client.storeValidatorSet(1, typo);
-        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.SetAlreadyStored.selector, uint64(1)));
-        client.storeValidatorSet(1, realSet1);
+        client.proposeValidatorSet(1, typo);
+        client.proposeValidatorSet(1, realSet1); // this client's delay is 0: supersedes at once
 
         bytes memory tx_ = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "x"));
         bytes memory pv = _pv(tx_, 432_001, realSet1, keccak256("real block"));
-        bytes memory proof = verifier.proofFor(VKEY, pv);
-        vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.WrongValidatorSet.selector, realSet1, typo));
-        client.verify(pv, proof);
+        client.verify(pv, verifier.proofFor(VKEY, pv));
     }
 
-    /// A single owner transaction can also hand the client to a dead address by mistake
-    /// (no two-step transfer): the next epoch's set can then never be stored.
-    function test_POC_setOwnerHasNoTwoStepConfirmation() public {
-        address typoAddress = address(0xdead);
-        client.setOwner(typoAddress);
-        vm.expectRevert(SolanaLightClient.NotOwner.selector);
-        client.storeValidatorSet(1, keccak256("next epoch"));
+    /// FIXED. Ownership moves in two steps, so a mistyped address strands nothing.
+    function test_FIXED_ownershipTransferNeedsTheNewOwnerToAccept() public {
+        client.transferOwnership(address(0xdead)); // the typo
+        client.proposeValidatorSet(1, keccak256("next epoch")); // still the owner
+        assertEq(client.owner(), address(this));
     }
 
     // ---- F7: `verify` ignored the conflicting-block record (FIXED) ----------------------

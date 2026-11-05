@@ -97,7 +97,7 @@ forge test -vv
 
 ## Status (2026-11-04)
 
-- 44 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
+- 49 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
   transaction parser (legacy, v0 and v1), the Solana-controlled greeter, and the outside review's attacks
   (`test/Adversarial.t.sol`: fixed ones assert the attack fails, open ones still show it).
 - The full TUI flow runs on fresh transactions in ~10 s with practice proofs, and end to end
@@ -107,7 +107,8 @@ forge test -vv
   - The forged memo is rejected (`InvalidProof`).
 - Gas on anvil, with the stand-in verifier:
   - deploy: 1,081,264;
-  - first `submit`: **105,825**, including the 21k base cost.
+  - first `submit`: **105,825**, including the 21k base cost, measured before the
+    delayed-set check was added. That check adds about 4.5k (one more storage read).
 
   The real Groth16 check adds roughly 270k, so expect ~380k per submit on a real chain.
 - **Waiting on a real Groth16 proof.** SP1's real verifier is in `src/sp1/`, and `test/Groth16.t.sol`
@@ -145,7 +146,17 @@ function act(bytes calldata output, bytes calldata proof) external {
 
 - The SP1 proof guarantees the Alpenglow signatures, the stake threshold, and that the
   transaction is in the block (see huginn's `docs/codebase.md`).
-- `SolanaLightClient`'s **owner stores each epoch's validator set hash** (write-once per
-  epoch). Until set rotation is proven, the owner is trusted for that.
+- `SolanaLightClient`'s **owner stores each epoch's validator set hash**. Until set rotation
+  is proven in SP1, the owner is trusted for that: an owner who proposes a set whose keys it
+  holds can prove anything. Make the owner a multisig. What limits the owner today:
+  - a proposed set only counts after `setDelay` (default one day off anvil). Until then
+    anyone can see it (`pendingSet`, the `ValidatorSetProposed` event), and the owner can
+    replace or cancel it, so a typo is fixed before anything relies on it. Watch those
+    events if you put value behind a client;
+  - a set already in force can be superseded the same way, never instantly;
+  - ownership moves in two steps (`transferOwnership`, then `acceptOwnership`).
+
+  Propose a set with `script/ProposeValidatorSet.s.sol` (`HUGINN_CLIENT`, `EPOCH`,
+  `VALIDATOR_SET_HASH`).
 - **Inclusion is not success.** Failed Solana transactions are in blocks too. Check what your
   contract needs from the transaction itself.

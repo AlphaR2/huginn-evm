@@ -32,9 +32,16 @@ contract Deploy is Script {
             uint16(vm.envUint("SHRED_VERSION")),
             uint64(vm.envUint("SLOTS_PER_EPOCH")),
             uint64(vm.envUint("EPOCH")),
-            vm.envBytes32("VALIDATOR_SET_HASH")
+            vm.envBytes32("VALIDATOR_SET_HASH"),
+            setDelay()
         );
         vm.stopBroadcast();
         console.log("SolanaLightClient:", address(client));
+        console.log("validator set delay (s):", client.setDelay());
+    }
+
+    /// SET_DELAY from .env. Unset: none on anvil, one day anywhere else.
+    function setDelay() internal view returns (uint64) {
+        return uint64(vm.envOr("SET_DELAY", block.chainid == 31337 ? uint256(0) : uint256(1 days)));
     }
 }
