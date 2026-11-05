@@ -97,8 +97,8 @@ forge test -vv
 
 ## Status (2026-11-04)
 
-- 39 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
-  transaction parser, the Solana-controlled greeter, and the outside review's attacks
+- 44 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
+  transaction parser (legacy, v0 and v1), the Solana-controlled greeter, and the outside review's attacks
   (`test/Adversarial.t.sol`: fixed ones assert the attack fails, open ones still show it).
 - The full TUI flow runs on fresh transactions in ~10 s with practice proofs, and end to end
   with a real STARK proof (~5 min).

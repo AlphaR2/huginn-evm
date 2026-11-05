@@ -8,6 +8,10 @@ contract TxHarness {
     function parse(bytes memory raw) external pure returns (SolanaTx.Transaction memory) {
         return SolanaTx.parse(raw);
     }
+
+    function firstSignature(bytes memory raw) external pure returns (bytes memory) {
+        return SolanaTx.firstSignature(raw);
+    }
 }
 
 contract SolanaTxTest is Test {
@@ -83,10 +87,79 @@ contract SolanaTxTest is Test {
     }
 
     function test_rejectsNonCanonicalLength() public {
-        // Signature count 1 written as two bytes (0x81 0x00) instead of one.
+        // Signature count 1 written as two bytes (0x81 0x00) instead of one. A first byte
+        // of 0x81 means v1, so this is read as (and refused as) a broken v1 transaction.
         bytes memory b = bytes.concat(hex"8100", _slice(raw, 1, raw.length));
-        vm.expectRevert(abi.encodeWithSelector(SolanaTx.Malformed.selector, 0));
+        vm.expectRevert();
         h.parse(b);
+    }
+
+    function test_rejectsUnknownFirstByte() public {
+        // 0x82 would be a "v2" transaction: no such format.
+        bytes memory b = bytes.concat(hex"82", _slice(raw, 1, raw.length));
+        vm.expectRevert(abi.encodeWithSelector(SolanaTx.UnsupportedVersion.selector, 2));
+        h.parse(b);
+    }
+
+    /// A v1 transaction serialized by Agave's SDK (huginn's fixtures/tx_v1_agave.json).
+    function test_parsesV1FromAgave() public view {
+        bytes memory v1 = _v1();
+        SolanaTx.Transaction memory t = h.parse(v1);
+        assertTrue(t.versioned);
+        assertEq(t.version, 1);
+        assertEq(t.signatures.length, 2);
+        assertEq(t.signatures[0], _repeat(0x11, 64));
+        assertEq(t.signatures[1], _repeat(0x22, 64));
+        assertEq(t.numRequiredSignatures, 2);
+        assertEq(t.numReadonlySigned, 1);
+        assertEq(t.numReadonlyUnsigned, 1);
+        assertEq(t.accountKeys.length, 4);
+        assertEq(t.accountKeys[0], bytes32(_repeat(0xa1, 32)));
+        assertEq(t.accountKeys[3], MEMO_PROGRAM);
+        assertEq(t.recentBlockhash, bytes32(_repeat(0x77, 32)));
+        assertEq(t.instructions.length, 2);
+        assertEq(t.programId(0), MEMO_PROGRAM);
+        assertEq(t.instructions[0].accounts, hex"0001");
+        assertEq(string(t.instructions[0].data), "huginn: hello from a v1 transaction");
+        assertEq(t.instructions[1].data, _repeat(0x61, 300));
+        assertEq(t.lookups.length, 0);
+        assertTrue(t.isSigner(bytes32(_repeat(0xb2, 32))));
+        assertFalse(t.isSigner(bytes32(_repeat(0xc3, 32))));
+        // The id is the first signature, which a v1 transaction keeps at the end.
+        assertEq(h.firstSignature(v1), _repeat(0x11, 64));
+    }
+
+    function test_v1RejectsEveryTruncationAndTrailingByte() public {
+        bytes memory v1 = _v1();
+        for (uint256 n; n < v1.length; n++) {
+            try h.parse(_slice(v1, 0, n)) {
+                revert("a truncated v1 transaction parsed");
+            } catch {}
+        }
+        vm.expectRevert();
+        h.parse(bytes.concat(v1, hex"00"));
+    }
+
+    function test_v1RejectsBadConfigMask() public {
+        bytes memory v1 = _v1();
+        v1[4] = 0x20; // an unknown config bit
+        vm.expectRevert(abi.encodeWithSelector(SolanaTx.Malformed.selector, 4));
+        h.parse(v1);
+        v1[4] = 0x01; // half a priority fee
+        vm.expectRevert(abi.encodeWithSelector(SolanaTx.Malformed.selector, 4));
+        h.parse(v1);
+    }
+
+    function _v1() internal view returns (bytes memory) {
+        string memory j = vm.readFile("test/fixtures/tx_v1_agave.json");
+        return vm.parseBytes(string.concat("0x", vm.parseJsonString(j, ".raw")));
+    }
+
+    function _repeat(uint8 b, uint256 n) internal pure returns (bytes memory out) {
+        out = new bytes(n);
+        for (uint256 i; i < n; i++) {
+            out[i] = bytes1(b);
+        }
     }
 
     function test_rejectsUnknownMessageVersion() public {

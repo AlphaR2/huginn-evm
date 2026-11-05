@@ -125,6 +125,25 @@ contract SolanaGreeterTest is Test {
         assertEq(bytes(greeter.greeting()).length, 200);
     }
 
+    /// The controller's command in a v1 transaction (signatures at the end) works the same,
+    /// and the light client records it under its first signature.
+    function test_v1TransactionCommands() public {
+        bytes memory memo = _memo(block.chainid, address(greeter), "1", "from a v1 transaction");
+        bytes memory tx_ = bytes.concat(
+            hex"81", hex"010001", hex"00000000", keccak256("blockhash"), // header, no config
+            hex"01", hex"02", CONTROLLER, MEMO, // 1 instruction, 2 addresses
+            hex"0101", bytes2(uint16(memo.length) << 8 | uint16(memo.length) >> 8), // program 1, 1 account, data length LE
+            hex"00", memo,
+            bytes32(uint256(7)), bytes32(0) // the signature, at the end
+        );
+        _execute(tx_);
+        assertEq(greeter.greeting(), "from a v1 transaction");
+
+        bytes memory pv = _pv(tx_);
+        client.submit(pv, verifier.proofFor(VKEY, pv));
+        assertTrue(client.isVerified(abi.encodePacked(bytes32(uint256(7)), bytes32(0))));
+    }
+
     // ---- building blocks ----------------------------------------------------------------
 
     function _execute(bytes memory tx_) internal {

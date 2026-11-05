@@ -98,11 +98,13 @@ The proof's output is plain bytes at fixed offsets, the same layout huginn's `Tx
 - `setOwner(0)` is refused: without an owner, nobody could store the next epoch's set.
 
 ### `SolanaTx.sol`: reading a Solana transaction
-The Solidity twin of huginn's `tx.rs`. `parse(raw)` returns signatures, header, account keys, blockhash, instructions and v0 lookups. Helpers:
+The Solidity twin of huginn's `tx.rs`. `parse(raw)` reads legacy, v0 and v1 transactions (v1 is live on mainnet: message first, signatures last, no lookup tables) and returns signatures, header, account keys, blockhash, instructions and v0 lookups; `version` says which format. Helpers:
 - `signer(i)` and `isSigner(key)`: who signed;
 - `programId(ix)`: which program an instruction called;
 - `account(ix, j)`: which accounts it used;
-- `firstSignature(raw)`: the transaction's id.
+- `firstSignature(raw)`: the transaction's id (at the end of a v1 transaction).
+
+Unproven bytes revert cleanly, but what's read from them means nothing: anyone can write bytes that claim any signer. Only trust a transaction a proof vouches for.
 
 Every read is bounds-checked. Lengths must use the shortest encoding, and every byte must be used. A count is checked against the bytes left *before* any memory is allocated, so junk input reverts cleanly instead of burning gas.
 
@@ -127,12 +129,12 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 
 ## 5. `test/`: what the contracts refuse
 
-39 tests (plus 5 Groth16 tests skipped until a real proof exists): `forge test -vv`.
+44 tests (plus 5 Groth16 tests skipped until a real proof exists): `forge test -vv`.
 
 | File | Covers |
 |---|---|
 | `SolanaLightClient.t.sol` | the **real** output of our proven memo transfer decodes field by field. Refused: one changed memo byte, another program's proof, another cluster, an unknown epoch, a wrong set, conflicting blocks, a non-owner storing sets, rewriting a set, a zero owner, bad framing. Plus a gas measurement |
-| `SolanaTx.t.sol` | the real transaction parsed exactly (0.5 SOL transfer + memo). Refused: every possible truncation, trailing bytes, non-canonical lengths, unknown versions. v0 lookups parse. 256 random inputs never panic |
+| `SolanaTx.t.sol` | the real transaction parsed exactly (0.5 SOL transfer + memo), and a v1 transaction written by Agave's SDK (`fixtures/tx_v1_agave.json`). Refused: every possible truncation, trailing bytes, non-canonical lengths, unknown versions, bad v1 config masks. v0 lookups parse. 256 random inputs never panic |
 | `SolanaGreeter.t.sol` | transactions built byte by byte. The controller changes the greeting. Refused: a stranger, a replay, commands out of order, malformed nonces, a memo for another chain, a memo for another deployment, a forged command. The address works in any letter case; an empty command cancels; a 200-byte command works |
 | `Adversarial.t.sol` | an outside review's attacks (huginn's `docs/adversarial-report.md`). `test_FIXED_*` assert a fixed attack now fails; `test_POC_*` still show an open one (the owner's power over validator sets) |
 | `fixtures/` | copies of huginn's proven output and the transaction's RPC copy |
