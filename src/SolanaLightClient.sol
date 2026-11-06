@@ -55,8 +55,11 @@ contract SolanaLightClient {
     mapping(uint64 => bytes32) internal _activeSet;
     /// epoch => a proposed set and when it starts to count.
     mapping(uint64 => Proposal) public pendingSet;
-    /// slot => block_id of every block seen finalized.
-    mapping(uint64 => bytes32) public finalizedBlock;
+    /// slot => validator set hash => block_id of the block seen finalized under that set.
+    /// Keyed by the set on purpose: a block recorded while a bad set was in force must not
+    /// block the real proof for that slot once the real set is back. Two different blocks
+    /// under the SAME set is the real safety failure `ConflictingBlock` reports.
+    mapping(uint64 => mapping(bytes32 => bytes32)) public finalizedBlock;
     /// keccak256(first signature) => slot, for every transaction submitted.
     mapping(bytes32 => uint64) public transactionSlot;
 
@@ -65,7 +68,7 @@ contract SolanaLightClient {
     event ValidatorSetProposed(uint64 indexed epoch, bytes32 setHash, uint64 activeAt);
     event ValidatorSetCancelled(uint64 indexed epoch, bytes32 setHash);
     event ValidatorSetStored(uint64 indexed epoch, bytes32 setHash);
-    event BlockFinalized(uint64 indexed slot, bytes32 blockId);
+    event BlockFinalized(uint64 indexed slot, bytes32 blockId, bytes32 setHash);
     event TransactionVerified(bytes32 indexed signatureHash, uint64 indexed slot, bytes32 blockId);
 
     error NotOwner();
@@ -75,7 +78,8 @@ contract SolanaLightClient {
     error UnknownEpoch(uint64 epoch);
     error WrongValidatorSet(bytes32 got, bytes32 expected);
     error WrongShredVersion(uint16 got);
-    /// Two different blocks finalized at one slot: a safety failure of Solana itself.
+    /// Two different blocks finalized at one slot by the same validator set: a safety failure
+    /// of Solana itself.
     error ConflictingBlock(uint64 slot, bytes32 stored, bytes32 got);
 
     constructor(
@@ -172,9 +176,10 @@ contract SolanaLightClient {
         bytes32 expected = validatorSetHash(epoch);
         if (expected == bytes32(0)) revert UnknownEpoch(epoch);
         if (out.validatorSetHash != expected) revert WrongValidatorSet(out.validatorSetHash, expected);
-        // Another block_id already recorded for this slot: refuse here too, not only in
-        // `submit`, so applications that call `verify` get the same protection.
-        bytes32 stored = finalizedBlock[out.slot];
+        // Another block_id already recorded for this slot under this same set: refuse here
+        // too, not only in `submit`, so applications that call `verify` get the same
+        // protection.
+        bytes32 stored = finalizedBlock[out.slot][expected];
         if (stored != bytes32(0) && stored != out.blockId) revert ConflictingBlock(out.slot, stored, out.blockId);
     }
 
@@ -185,9 +190,9 @@ contract SolanaLightClient {
         returns (HuginnOutput.Output memory out)
     {
         out = verify(publicValues, proof); // reverts on a conflicting block
-        if (finalizedBlock[out.slot] == bytes32(0)) {
-            finalizedBlock[out.slot] = out.blockId;
-            emit BlockFinalized(out.slot, out.blockId);
+        if (finalizedBlock[out.slot][out.validatorSetHash] == bytes32(0)) {
+            finalizedBlock[out.slot][out.validatorSetHash] = out.blockId;
+            emit BlockFinalized(out.slot, out.blockId, out.validatorSetHash);
         }
         bytes32 sigHash = keccak256(SolanaTx.firstSignature(out.transaction));
         transactionSlot[sigHash] = out.slot;

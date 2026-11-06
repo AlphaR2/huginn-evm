@@ -21,7 +21,13 @@ import {SolanaTx} from "./SolanaTx.sol";
 /// The nonce gives commands a fixed order: a relayer can delay a command but not reorder
 /// them, and each command runs at most once. To cancel a command you signed but that was
 /// never relayed, sign an empty command with the same nonce (`...:<nonce>:`) and relay that
-/// one first: it uses up the nonce and runs nothing.
+/// one first: it uses up the nonce and runs nothing. This is a race, not a guarantee: a
+/// command's proof is public as soon as it is final, so anyone can relay it before the
+/// cancel's proof exists. Don't sign a command you may want to take back; if it must be
+/// revocable, make the command itself conditional (an expiry or a flag it checks).
+///
+/// A command that reverts does not block the ones behind it: the failure is logged
+/// (`CommandFailed`) and the nonce is spent. Sign it again with the next nonce to retry.
 ///
 /// A failed Solana transaction still counts. Solana includes failed transactions in blocks,
 /// and the proof shows inclusion, not success. Authority comes from the controller's
@@ -38,11 +44,17 @@ abstract contract SolanaControlled {
     uint64 public nonce;
 
     event Executed(uint64 indexed nonce, uint64 slot, bytes command);
+    /// The command ran out of road or reverted. Its nonce is used up anyway, so it can't
+    /// stall the commands behind it; sign it again with the next nonce if you still want it.
+    event CommandFailed(uint64 indexed nonce, bytes reason);
 
     error NotSignedByController();
     error NoCommand();
     error BadNonce();
     error WrongNonce(uint64 got, uint64 expected);
+    error OnlySelf();
+    /// Too little gas was given for the command. Retry with more: the nonce is not spent.
+    error NotEnoughGas();
 
     constructor(SolanaLightClient huginn_, bytes32 controller_) {
         huginn = huginn_;
@@ -59,11 +71,28 @@ abstract contract SolanaControlled {
         if (n != nonce + 1) revert WrongNonce(n, nonce + 1);
         nonce = n;
 
-        // The only external call above is `huginn.verify`, a view (STATICCALL): it can't
-        // re-enter, and `nonce` is updated before `_execute` runs.
+        // `nonce` is updated before the command runs, so the command can't run twice.
         // forge-lint: disable-next-line(reentrancy-events)
         emit Executed(n, out.slot, command);
-        if (command.length != 0) _execute(command);
+        if (command.length == 0) return;
+
+        // A command that reverts must not freeze the queue (anyone able to make it revert
+        // could stall every later command), so a failure is recorded and the nonce stays
+        // spent. The catch is only trusted if the failure was the command's own: when the
+        // relayer starved it of gas, less than 1/64 of the gas is left and we revert so the
+        // same proof can be relayed again with enough gas.
+        uint256 before = gasleft();
+        try this.run(command) {}
+        catch (bytes memory reason) {
+            if (gasleft() <= before / 64) revert NotEnoughGas();
+            emit CommandFailed(n, reason);
+        }
+    }
+
+    /// Runs `command` for `execute`, so its failure can be caught. Not callable from outside.
+    function run(bytes calldata command) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        _execute(command);
     }
 
     /// The memo prefix this contract answers to, without the nonce:

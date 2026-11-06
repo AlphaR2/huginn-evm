@@ -53,7 +53,7 @@ contract SolanaLightClientTest is Test {
     function test_submitRecordsBlockAndTransaction() public {
         assertFalse(client.isVerified(sig));
         HuginnOutput.Output memory o = client.submit(pv, proofOf(pv));
-        assertEq(client.finalizedBlock(SLOT), o.blockId);
+        assertEq(client.finalizedBlock(SLOT, client.validatorSetHash(client.epochOf(SLOT))), o.blockId);
         assertTrue(client.isVerified(sig));
         assertEq(client.transactionSlot(keccak256(sig)), SLOT);
         // Submitting the same transaction again is harmless.
@@ -110,7 +110,7 @@ contract SolanaLightClientTest is Test {
         client.submit(pv, proofOf(pv));
         bytes memory other = bytes.concat(pv);
         other[43] ^= 0x01; // block_id
-        bytes32 stored = client.finalizedBlock(SLOT);
+        bytes32 stored = client.finalizedBlock(SLOT, client.validatorSetHash(client.epochOf(SLOT)));
         bytes32 got = bytes32(stored ^ bytes32(uint256(1) << 248));
         bytes memory proof = proofOf(other);
         vm.expectRevert(abi.encodeWithSelector(SolanaLightClient.ConflictingBlock.selector, SLOT, stored, got));
