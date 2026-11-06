@@ -121,7 +121,9 @@ An abstract base. The controller sends a Solana transaction with a memo: `huginn
 - the memo names **this chain** and **this contract's address** (any letter case), so it can't run on another chain or another deployment;
 - the nonce is exactly `nonce + 1`, so commands run once each and in the order the controller numbered them. A relayer can delay a command, never reorder it.
 
-`memoPrefix()` returns `huginn:<chain id>:<address>:`, which is what tools put before the nonce. An empty command uses up its nonce and runs nothing: that's how the controller cancels a command it signed but nobody relayed.
+`memoPrefix()` returns `huginn:<chain id>:<address>:`, which is what tools put before the nonce. An empty command uses up its nonce and runs nothing: that's how the controller cancels a command it signed but nobody relayed. This is a race, not a guarantee: the command's proof is public once final, so anyone can relay it before the cancel exists.
+
+If `_execute` reverts, `execute` does not: it logs `CommandFailed` and the nonce stays spent, so one bad command can't freeze the ones behind it (sign it again to retry). If the relayer gave too little gas for the command to finish, the whole call reverts with `NotEnoughGas` instead, and the nonce is not spent.
 
 Your contract implements `_execute(command)`. Note in the file: a *failed* Solana transaction still counts, because authority comes from the signature, not from success. Don't build commands that depend on the Solana side succeeding.
 
@@ -142,7 +144,8 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 | `SolanaLightClient.t.sol` | the **real** output of our proven memo transfer decodes field by field. Refused: one changed memo byte, another program's proof, another cluster, an unknown epoch, a wrong set, conflicting blocks, a non-owner proposing sets, a zero set, bad framing. Sets count only after the delay, can be replaced or cancelled before, and superseded after; ownership moves in two steps. Plus a gas measurement |
 | `SolanaTx.t.sol` | the real transaction parsed exactly (0.5 SOL transfer + memo), and a v1 transaction written by Agave's SDK (`fixtures/tx_v1_agave.json`). Refused: every possible truncation, trailing bytes, non-canonical lengths, unknown versions, bad v1 config masks. v0 lookups parse. 256 random inputs never panic |
 | `SolanaGreeter.t.sol` | transactions built byte by byte. The controller changes the greeting. Refused: a stranger, a replay, commands out of order, malformed nonces, a memo for another chain, a memo for another deployment, a forged command. The address works in any letter case; an empty command cancels; a 200-byte command works |
-| `Adversarial.t.sol` | an outside review's attacks (huginn's `docs/adversarial-report.md`). `test_FIXED_*` assert a fixed attack now fails; `test_POC_*` still show an open one (the owner can still forge with a fake set, but only after the public delay) |
+| `Adversarial2.t.sol` | the second review's attacks on the fixes: failing commands, gas starvation, conflict records per validator set, the set delay. `test_LIMIT_*` pins the cancel race, which can't be fixed in the contract |
+| `Adversarial.t.sol` | an outside review's attacks (huginn's `docs/research/adversarial-report.md`). `test_FIXED_*` assert a fixed attack now fails; `test_POC_*` still show an open one (the owner can still forge with a fake set, but only after the public delay) |
 | `fixtures/` | copies of huginn's proven output and the transaction's RPC copy |
 
 ---
@@ -151,6 +154,7 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 
 | Script | Does |
 |---|---|
+| `Preflight.s.sol` | read-only checks before a real deploy: right chain, funded non-test key, verifier has code, nothing empty or zero. Sends nothing. See `docs/deploy.md` |
 | `Deploy.s.sol` | deploys `SolanaLightClient` with `SET_DELAY` (unset: 0 on anvil, one day elsewhere); on anvil with no `SP1_VERIFIER`, first deploys the stand-in verifier |
 | `Submit.s.sol` | reads `PROOF_FILE` (`proofs/proof.json`) and calls `submit`. A proof with no on-chain bytes (practice/STARK) only works on anvil |
 | `DeployGreeter.s.sol` | deploys `SolanaGreeter` for `SOLANA_CONTROLLER` (a Solana public key as 32 bytes hex) |

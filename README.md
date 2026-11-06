@@ -82,15 +82,13 @@ forge test
 
 ## Run it on a real chain (Base Sepolia, Base, ...)
 
-1. Set `RPC_URL`, `PRIVATE_KEY` and `SP1_VERIFIER` (Succinct's gateway on that chain) in `.env`.
-2. Set `SHRED_VERSION`, `EPOCH`, `VALIDATOR_SET_HASH` for the Solana cluster you follow.
-3. `./app/target/release/huginn-evm run --mode groth16`, or press `m` until groth16 in the TUI.
+Follow [`docs/deploy.md`](docs/deploy.md): what you need, a read-only preflight check (`script/Preflight.s.sol`), then deploy, hand ownership to a multisig, and prove.
 
-## Status (2026-11-04)
+## Status
 
-- 49 Foundry tests pass: the real proven memo transfer from huginn's local chain, the
+- 59 Foundry tests pass (5 Groth16 tests skipped until a real proof exists): the real proven memo transfer from huginn's local chain, the
   transaction parser (legacy, v0 and v1), the Solana-controlled greeter, and the outside review's attacks
-  (`test/Adversarial.t.sol`: fixed ones assert the attack fails, open ones still show it).
+  (`test/Adversarial*.t.sol`: fixed ones assert the attack fails, open ones still show it).
 - The full TUI flow runs on fresh transactions in ~10 s with practice proofs, and end to end
   with a real STARK proof (~5 min).
   - The steps: send, finalize, fetch, prove, deploy, submit, `isVerified` true.

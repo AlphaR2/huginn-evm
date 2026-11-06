@@ -7,7 +7,7 @@ import {SolanaControlled} from "../src/SolanaControlled.sol";
 import {SolanaGreeter} from "../src/examples/SolanaGreeter.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
 
-/// Adversarial proofs-of-concept from an outside review (docs/adversarial-report.md in huginn).
+/// Adversarial proofs-of-concept from an outside review (docs/research/adversarial-report.md in huginn).
 ///
 /// `test_POC_*` PASSES while the weakness is present (it asserts the bad outcome).
 /// `test_FIXED_*` is a former PoC flipped after the fix: it asserts the attack now fails.

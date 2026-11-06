@@ -6,3 +6,12 @@ app/target/
 proofs/*
 !proofs/.gitkeep
 .env
+
+# Personal notes and generated results
+notes/
+scratch/
+*.log
+lcov.info
+coverage/
+test-results/
+.DS_Store
