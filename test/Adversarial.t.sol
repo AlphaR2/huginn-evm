@@ -40,10 +40,14 @@ contract AdversarialTest is Test {
     function test_FIXED_commandsCannotBeRelayedOutOfOrder() public {
         bytes memory first = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "A (old, superseded)"));
         bytes memory second = _memoTx(CONTROLLER, 2, _memo(greeter, 2, "B (latest intent)"));
-        _expectRevert(greeter, second, 50_001, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(2), uint64(1)));
+        _expectRevert(
+            greeter, second, 50_001, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(2), uint64(1))
+        );
         _execute(greeter, first, 50_000);
         _execute(greeter, second, 50_001);
-        _expectRevert(greeter, first, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(3)));
+        _expectRevert(
+            greeter, first, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(3))
+        );
         assertEq(greeter.greeting(), "B (latest intent)");
     }
 
@@ -64,7 +68,9 @@ contract AdversarialTest is Test {
         bytes memory dormant = _memoTx(CONTROLLER, 1, _memo(greeter, 1, "dormant"));
         _execute(greeter, _memoTx(CONTROLLER, 2, _memo(greeter, 1, "")), 50_001);
         vm.warp(block.timestamp + 5 * 365 days);
-        _expectRevert(greeter, dormant, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
+        _expectRevert(
+            greeter, dormant, 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2))
+        );
         assertEq(greeter.greeting(), "gm");
     }
 
@@ -73,7 +79,12 @@ contract AdversarialTest is Test {
     function test_FIXED_replayGuardIsTheSignedNonce() public {
         bytes memory m = _memo(greeter, 1, "same message");
         _execute(greeter, _memoTx(CONTROLLER, 1, m), 50_000);
-        _expectRevert(greeter, _memoTx(CONTROLLER, 2, m), 50_000, abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2)));
+        _expectRevert(
+            greeter,
+            _memoTx(CONTROLLER, 2, m),
+            50_000,
+            abi.encodeWithSelector(SolanaControlled.WrongNonce.selector, uint64(1), uint64(2))
+        );
     }
 
     // ---- F2: the validator-set owner is the root of trust ----------------------------------
@@ -166,12 +177,18 @@ contract AdversarialTest is Test {
     function _memoTx(bytes32 signer, uint8 sigSeed, bytes memory memo) internal pure returns (bytes memory) {
         bytes memory sig = abi.encodePacked(bytes32(uint256(sigSeed)), bytes32(0));
         return bytes.concat(
-            hex"01", sig,
+            hex"01",
+            sig,
             hex"010001",
-            hex"02", signer, MEMO,
+            hex"02",
+            signer,
+            MEMO,
             keccak256("blockhash"),
-            hex"01", hex"01", hex"0100",
-            _compactU16(memo.length), memo
+            hex"01",
+            hex"01",
+            hex"0100",
+            _compactU16(memo.length),
+            memo
         );
     }
 
@@ -183,9 +200,19 @@ contract AdversarialTest is Test {
 
     function _pv(bytes memory tx_, uint64 slot, bytes32 setHash, bytes32 blockId) internal pure returns (bytes memory) {
         return bytes.concat(
-            hex"01", setHash, bytes2(SHRED_VERSION), bytes8(slot), blockId,
-            hex"00", bytes8(uint64(1000)), bytes8(uint64(1000)),
-            bytes4(0), bytes4(0), bytes4(0), bytes2(uint16(tx_.length)), tx_
+            hex"01",
+            setHash,
+            bytes2(SHRED_VERSION),
+            bytes8(slot),
+            blockId,
+            hex"00",
+            bytes8(uint64(1000)),
+            bytes8(uint64(1000)),
+            bytes4(0),
+            bytes4(0),
+            bytes4(0),
+            bytes2(uint16(tx_.length)),
+            tx_
         );
     }
 }

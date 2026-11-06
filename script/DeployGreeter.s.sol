@@ -11,7 +11,8 @@ import {SolanaGreeter} from "../src/examples/SolanaGreeter.sol";
 contract DeployGreeter is Script {
     function run() external returns (SolanaGreeter greeter) {
         vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
-        greeter = new SolanaGreeter(SolanaLightClient(vm.envAddress("HUGINN_CLIENT")), vm.envBytes32("SOLANA_CONTROLLER"));
+        greeter =
+            new SolanaGreeter(SolanaLightClient(vm.envAddress("HUGINN_CLIENT")), vm.envBytes32("SOLANA_CONTROLLER"));
         vm.stopBroadcast();
         console.log("SolanaGreeter:", address(greeter));
     }

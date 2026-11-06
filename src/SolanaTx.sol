@@ -169,7 +169,8 @@ library SolanaTx {
         t.numRequiredSignatures = _u8(raw, 1);
         t.numReadonlySigned = _u8(raw, 2);
         t.numReadonlyUnsigned = _u8(raw, 3);
-        uint32 mask = uint32(_u8(raw, 4)) | uint32(_u8(raw, 5)) << 8 | uint32(_u8(raw, 6)) << 16 | uint32(_u8(raw, 7)) << 24;
+        uint32 mask =
+            uint32(_u8(raw, 4)) | uint32(_u8(raw, 5)) << 8 | uint32(_u8(raw, 6)) << 16 | uint32(_u8(raw, 7)) << 24;
         uint32 fee = mask & 3;
         if (mask & ~V1_KNOWN_BITS != 0 || fee == 1 || fee == 2) revert Malformed(4);
         uint256 p;

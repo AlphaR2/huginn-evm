@@ -38,19 +38,26 @@ contract SolanaGreeterTest is Test {
     function test_memoPrefixIsWhatToolsBuild() public view {
         assertEq(
             greeter.memoPrefix(),
-            string.concat("huginn:", vm.toString(block.chainid), ":", vm.toLowercase(vm.toString(address(greeter))), ":")
+            string.concat(
+                "huginn:", vm.toString(block.chainid), ":", vm.toLowercase(vm.toString(address(greeter))), ":"
+            )
         );
     }
 
     function test_addressInAnyLetterCase() public {
         // vm.toString(address) is the checksummed (mixed-case) form explorers show.
-        bytes memory memo = abi.encodePacked("huginn:", vm.toString(block.chainid), ":", vm.toString(address(greeter)), ":1:mixed case");
+        bytes memory memo = abi.encodePacked(
+            "huginn:", vm.toString(block.chainid), ":", vm.toString(address(greeter)), ":1:mixed case"
+        );
         _execute(_memoTx(CONTROLLER, 1, memo));
         assertEq(greeter.greeting(), "mixed case");
     }
 
     function test_strangerCannot() public {
-        _expectRevert(_memoTx(STRANGER, 1, _memo(block.chainid, address(greeter), "1", "pwned")), abi.encodeWithSelector(SolanaControlled.NotSignedByController.selector));
+        _expectRevert(
+            _memoTx(STRANGER, 1, _memo(block.chainid, address(greeter), "1", "pwned")),
+            abi.encodeWithSelector(SolanaControlled.NotSignedByController.selector)
+        );
     }
 
     function test_noReplay() public {
@@ -85,7 +92,10 @@ contract SolanaGreeterTest is Test {
     function test_badNoncesRejected() public {
         string[5] memory bad = ["", "01", "x", "1x", "12345678901234567890"];
         for (uint256 i; i < bad.length; i++) {
-            _expectRevert(_memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), bad[i], "hi")), abi.encodeWithSelector(SolanaControlled.BadNonce.selector));
+            _expectRevert(
+                _memoTx(CONTROLLER, 1, _memo(block.chainid, address(greeter), bad[i], "hi")),
+                abi.encodeWithSelector(SolanaControlled.BadNonce.selector)
+            );
         }
         // No ':' after the nonce.
         bytes memory noColon = abi.encodePacked(greeter.memoPrefix(), "1");
@@ -93,7 +103,10 @@ contract SolanaGreeterTest is Test {
     }
 
     function test_memoForAnotherChainIsIgnored() public {
-        _expectRevert(_memoTx(CONTROLLER, 1, _memo(8453, address(greeter), "1", "base mainnet only")), abi.encodeWithSelector(SolanaControlled.NoCommand.selector));
+        _expectRevert(
+            _memoTx(CONTROLLER, 1, _memo(8453, address(greeter), "1", "base mainnet only")),
+            abi.encodeWithSelector(SolanaControlled.NoCommand.selector)
+        );
     }
 
     function test_memoForAnotherDeploymentIsIgnored() public {
@@ -130,11 +143,20 @@ contract SolanaGreeterTest is Test {
     function test_v1TransactionCommands() public {
         bytes memory memo = _memo(block.chainid, address(greeter), "1", "from a v1 transaction");
         bytes memory tx_ = bytes.concat(
-            hex"81", hex"010001", hex"00000000", keccak256("blockhash"), // header, no config
-            hex"01", hex"02", CONTROLLER, MEMO, // 1 instruction, 2 addresses
-            hex"0101", bytes2(uint16(memo.length) << 8 | uint16(memo.length) >> 8), // program 1, 1 account, data length LE
-            hex"00", memo,
-            bytes32(uint256(7)), bytes32(0) // the signature, at the end
+            hex"81",
+            hex"010001",
+            hex"00000000",
+            keccak256("blockhash"), // header, no config
+            hex"01",
+            hex"02",
+            CONTROLLER,
+            MEMO, // 1 instruction, 2 addresses
+            hex"0101",
+            bytes2(uint16(memo.length) << 8 | uint16(memo.length) >> 8), // program 1, 1 account, data length LE
+            hex"00",
+            memo,
+            bytes32(uint256(7)),
+            bytes32(0) // the signature, at the end
         );
         _execute(tx_);
         assertEq(greeter.greeting(), "from a v1 transaction");
@@ -159,8 +181,14 @@ contract SolanaGreeterTest is Test {
     }
 
     /// `huginn:<chain>:<address, lowercase>:<nonce>:<command>`
-    function _memo(uint256 chain, address to, string memory nonce, string memory command) internal pure returns (bytes memory) {
-        return abi.encodePacked("huginn:", vm.toString(chain), ":", vm.toLowercase(vm.toString(to)), ":", nonce, ":", command);
+    function _memo(uint256 chain, address to, string memory nonce, string memory command)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodePacked(
+            "huginn:", vm.toString(chain), ":", vm.toLowercase(vm.toString(to)), ":", nonce, ":", command
+        );
     }
 
     /// Legacy transaction: 1 signature, keys [signer, Memo program], one Memo instruction.
@@ -168,12 +196,18 @@ contract SolanaGreeterTest is Test {
     function _memoTx(bytes32 signer, uint8 sigSeed, bytes memory memo) internal pure returns (bytes memory) {
         bytes memory sig = abi.encodePacked(bytes32(uint256(sigSeed)), bytes32(0));
         return bytes.concat(
-            hex"01", sig, // signatures
+            hex"01",
+            sig, // signatures
             hex"010001", // header: 1 signer, 0 readonly signed, 1 readonly unsigned
-            hex"02", signer, MEMO, // account keys
+            hex"02",
+            signer,
+            MEMO, // account keys
             keccak256("blockhash"),
-            hex"01", hex"01", hex"0100", // 1 instruction: program 1 (Memo), accounts [0]
-            _compactU16(memo.length), memo
+            hex"01",
+            hex"01",
+            hex"0100", // 1 instruction: program 1 (Memo), accounts [0]
+            _compactU16(memo.length),
+            memo
         );
     }
 
@@ -186,9 +220,19 @@ contract SolanaGreeterTest is Test {
     /// The proof's output for `tx_` in slot 50,000 of the local chain (epoch 0).
     function _pv(bytes memory tx_) internal pure returns (bytes memory) {
         return bytes.concat(
-            hex"01", SET_0, bytes2(SHRED_VERSION), bytes8(uint64(50_000)), keccak256("block"),
-            hex"00", bytes8(uint64(1000)), bytes8(uint64(1000)), // fast path, all stake
-            bytes4(0), bytes4(0), bytes4(0), bytes2(uint16(tx_.length)), tx_
+            hex"01",
+            SET_0,
+            bytes2(SHRED_VERSION),
+            bytes8(uint64(50_000)),
+            keccak256("block"),
+            hex"00",
+            bytes8(uint64(1000)),
+            bytes8(uint64(1000)), // fast path, all stake
+            bytes4(0),
+            bytes4(0),
+            bytes4(0),
+            bytes2(uint16(tx_.length)),
+            tx_
         );
     }
 }
