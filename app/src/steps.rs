@@ -735,7 +735,7 @@ impl Runner {
                         }
                         None => {
                             self.log(id, "✗ SP1_VERIFIER is empty: a real chain needs Succinct's verifier address");
-                            self.log(id, "    fix: see docs/devnet-runbook.md (Base Sepolia: 0xb69f2584CBcFf99a58C4e7002E8b89Af54a6f4e2)");
+                            self.log(id, "    fix: see docs/deploy.md (Base Sepolia: 0xb69f2584CBcFf99a58C4e7002E8b89Af54a6f4e2)");
                             missing.push("SP1_VERIFIER");
                         }
                     }
