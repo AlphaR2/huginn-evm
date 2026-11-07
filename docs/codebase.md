@@ -154,6 +154,7 @@ The smallest `SolanaControlled`: a `greeting` that only the controller's memos c
 
 | Script | Does |
 |---|---|
+| `Whoami.s.sol` | read-only: prints the deployer address and balance for `PRIVATE_KEY` (read from the environment, so the key never appears on a command line). The doctor uses it |
 | `Preflight.s.sol` | read-only checks before a real deploy: right chain, funded non-test key, verifier has code, nothing empty or zero. Sends nothing. See `docs/deploy.md` |
 | `Deploy.s.sol` | deploys `SolanaLightClient` with `SET_DELAY` (unset: 0 on anvil, one day elsewhere); on anvil with no `SP1_VERIFIER`, first deploys the stand-in verifier |
 | `Submit.s.sol` | reads `PROOF_FILE` (`proofs/proof.json`) and calls `submit`. A proof with no on-chain bytes (practice/STARK) only works on anvil |
@@ -173,7 +174,7 @@ A Rust crate that depends on huginn's `huginn-prover`. It has its own workspace,
 - `huginn-evm` opens the TUI.
 - `huginn-evm run [steps…]` runs steps without the screen, printing each step's log.
 - `huginn-evm vkey` prints the program key.
-- Flags: `--memo`, `--mode mock|compressed|groth16` (`mock` is what the TUI calls "practice"), `--certs shreds|plugin`, `--huginn <path>`.
+- Flags: `--cluster local|devnet`, `--memo`, `--mode mock|compressed|groth16` (`mock` is what the TUI calls "practice"), `--certs shreds|plugin`, `--huginn <path>`.
 
 It must run from this repo, because it reads `.env` and `script/`.
 
@@ -181,7 +182,9 @@ It must run from this repo, because it reads `.env` and `script/`.
 - **`StepId`**: the 12 steps, each with a name, a title and a one-line explanation:
   doctor → anvil → deploy → greeter → send → finalize → fetch → prove → submit → check → command → forged.
   The contracts come first because the memo names the greeter's address and next nonce.
-- **`Settings`**: `.env.example` with `.env` on top, plus memo, proof mode and certificate source.
+- **`Settings`**: `.env.example` with `.env` on top, plus memo, proof mode, certificate source and the **cluster** (`Cluster::Local`: the validator's own ledger; `Cluster::Devnet`: public devnet RPC, shreds from validators by the repair protocol).
+- **Facts**: every step records the data it finds with `fact(..)` (label, full value, optional explorer link). They stream to the screen as `Event::Fact`, are kept in `State` and `proofs/state.json`, and are written to **`proofs/receipt.md`** after every step, together with commands that check the values without this program. Examples: the signature and explorer link, the peer that served the shreds, the signer bitmap and signed stake %, the proof's decoded public values (`decode_pv`), contract addresses and transaction hashes (read from forge's broadcast record), and values read back from the chain with `cast call`.
+- **Cluster config comes from the live chain**, not from `.env` or the repo's fixtures: `deploy` runs `fetch cluster-info` and `fetch validator-set` against the cluster's RPC (into `proofs/<cluster>/<cluster>/`) and deploys the light client with that shred version, epoch and set hash. `fetch` refuses a transaction whose epoch differs from the deployed one.
 - **`State`**: what the flow has found so far (signature, slot, proof file, contract addresses, gas, greeting). It's saved to `proofs/state.json` after every step, so `run submit` works on its own later.
 - **`Runner::run(step)`** runs one step and reports it as events (`Started`, `Log`, `Done`, `State`, `Finished`). The TUI and `run` both listen to the same events.
 - **The steps themselves** mostly run the tools you would run by hand: `solana transfer`, `ledger-dump`, `forge script`, `cast call`. That way each logged command is copyable. Only `deploy` (the program key) and `prove` call the library directly (`huginn_prover::Huginn`).
@@ -194,11 +197,9 @@ It must run from this repo, because it reads `.env` and `script/`.
 
 ### `src/tui.rs`: the screen
 Two views of the same run:
-- **Guided (default):** your message, five stages (Set up, Send, Finalize, Prove, Verify) mapped onto the 12 steps by `STAGES`, and plain sentences.
-  - `doing_text` says what's happening now;
-  - `done_text` says what happened;
+- **Guided (default):** your message, the route (`Solana devnet ──▶ SP1 proof ──▶ EVM chain 84532`), five stages (Set up, Send, Finalize, Prove, Verify) mapped onto the 12 steps by `STAGES`, and below them a **live data feed** (`draw_data`): for every step that has started, its header and every fact it found, values printed in full so they can be selected and copied. It follows the newest step; `j`/`k` scroll, `f` follows again.
   - `failure_help` says what's wrong and the fix;
-  - one result card at the end, which says what was really shown: a practice run proves nothing, a STARK is checked on your machine, only Groth16 is checked by the contract.
+  - the closing line says what was really shown: a practice run proves nothing, a STARK is checked on your machine, only Groth16 is checked by the contract, and points to `proofs/receipt.md`.
 - **Details (`d`):** every step with its exact command and output, and the three boxes (Solana, proof, EVM).
 - **Help (`?`):** the keys and the two settings (`m` proof, `s` signature source).
 

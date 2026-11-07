@@ -82,7 +82,7 @@ forge test
 
 ## Run it on a real chain (Base Sepolia, Base, ...)
 
-Follow [`docs/deploy.md`](docs/deploy.md): what you need, a read-only preflight check (`script/Preflight.s.sol`), then deploy, hand ownership to a multisig, and prove.
+**Solana devnet → Base Sepolia on one VPS, step by step:** [`docs/devnet-runbook.md`](docs/devnet-runbook.md) (`huginn-evm --cluster devnet --mode groth16`). The general deploy notes are in [`docs/deploy.md`](docs/deploy.md): what you need, a read-only preflight check (`script/Preflight.s.sol`), then deploy, hand ownership to a multisig, and prove.
 
 ## Status
 
