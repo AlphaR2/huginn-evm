@@ -1205,6 +1205,17 @@ impl Runner {
                 false,
             )
             .await?;
+        // The vote accounts as they are now can include validators that registered a BLS key
+        // after the epoch began; the real certificates were signed without them. Check a recent
+        // block's certificate and drop them, before anything is deployed with this set's hash.
+        if self.settings.cluster == Cluster::Devnet {
+            if let Err(e) = self.reconcile_set(id).await {
+                self.log(
+                    id,
+                    format!("could not check the set against a certificate ({e:#}); using it as fetched"),
+                );
+            }
+        }
         // "epoch 1202: 4366 vote accounts, 26 with BLS key, 22 ranked, total stake N, commitment HEX -> file"
         let line = out
             .lines()
@@ -1241,7 +1252,71 @@ impl Runner {
             self.sets_dir().join("cluster_info.json"),
         )?)?;
         let shred_version = info["shred_version"].as_u64().context("shred_version")?;
+        // The set file is the truth: reconciling may have changed it since `fetch` printed.
+        let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            self.sets_dir().join(format!("validator_set_{epoch}.json")),
+        )?)?;
+        let ranked = file["validator_set"]["entries"]
+            .as_array()
+            .map(|a| a.len() as u64)
+            .unwrap_or(ranked);
+        let stake = file["validator_set"]["total_stake"]
+            .as_u64()
+            .unwrap_or(stake);
+        let commitment = file["commitment"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or(commitment);
         Ok((epoch, ranked, stake, commitment, shred_version))
+    }
+
+    /// Fetches a recently finalized block and its certificate, and has ledger-dump make the
+    /// saved set agree with it (see `ledger-dump --fix-set`).
+    async fn reconcile_set(&mut self, id: StepId) -> Result<()> {
+        let huginn = self.settings.huginn_dir.clone();
+        let slot = self
+            .rpc("getSlot", r#"[{"commitment":"finalized"}]"#)
+            .await?["result"]
+            .as_u64()
+            .context("finalized slot")?
+            .saturating_sub(60);
+        let dir = self.settings.evm_dir.join("proofs/probe");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (slot_s, dir_s) = (slot.to_string(), dir.display().to_string());
+        let rpc = self.settings.solana_rpc.clone();
+        self.log(
+            id,
+            format!("checking the set against the certificate of a recent block (slot {slot})"),
+        );
+        let repair = huginn.join("target/release/shred-repair");
+        self.cmd(
+            id,
+            repair.to_str().unwrap(),
+            &["--rpc", &rpc, "fetch", "--slot", &slot_s, "--out", &dir_s],
+            Some(&huginn),
+            &[],
+            true,
+        )
+        .await?;
+        let sets = self.sets_dir().display().to_string();
+        self.cmd(
+            id,
+            self.ledger_dump().to_str().unwrap(),
+            &[
+                "--shreds",
+                &dir_s,
+                "--slot",
+                &slot_s,
+                "--sets",
+                &sets,
+                "--fix-set",
+            ],
+            Some(&huginn),
+            &[],
+            false,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Everything worth showing about the fetched block, read from the fixture ledger-dump wrote.
