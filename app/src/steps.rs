@@ -1275,7 +1275,7 @@ impl Runner {
         let huginn = self.settings.huginn_dir.clone();
         let newest = self
             .rpc("getSlot", r#"[{"commitment":"finalized"}]"#)
-            .await?["result"]
+            .await?
             .as_u64()
             .context("finalized slot")?
             .saturating_sub(80);
