@@ -1187,64 +1187,76 @@ impl Runner {
             false,
         )
         .await?;
-        let out = self
-            .cmd(
-                id,
-                fetch.to_str().unwrap(),
-                &[
-                    "--rpc",
-                    &rpc,
-                    "--out",
-                    &root,
-                    "validator-set",
-                    "--cluster",
-                    cluster,
-                ],
-                Some(&huginn),
-                &[],
-                false,
-            )
-            .await?;
-        // The vote accounts as they are now can include validators that registered a BLS key
-        // after the epoch began; the real certificates were signed without them. Check a recent
-        // block's certificate and drop them, before anything is deployed with this set's hash.
-        if self.settings.cluster == Cluster::Devnet {
-            self.reconcile_set(id)
-                .await
-                .context("the validator set could not be matched to real certificates; not deploying with a set that may be wrong")?;
-        }
-        // "epoch 1202: 4366 vote accounts, 26 with BLS key, 22 ranked, total stake N, commitment HEX -> file"
-        let line = out
-            .lines()
-            .find(|l| l.starts_with("epoch "))
-            .context("fetch printed no epoch line")?;
-        let num = |after: &str| -> Option<u64> {
-            line.split(after)
-                .nth(1)?
-                .split(|c: char| !c.is_ascii_digit())
-                .next()?
-                .parse()
+        // A set already matched to real certificates for this epoch stays good for the epoch:
+        // reuse it instead of repeating the slow check.
+        let reuse = if self.settings.cluster == Cluster::Devnet {
+            let epoch_now = self.rpc("getEpochInfo", "[]").await?["epoch"]
+                .as_u64()
+                .context("epoch")?;
+            let path = self
+                .sets_dir()
+                .join(format!("validator_set_{epoch_now}.json"));
+            let matched = std::fs::read_to_string(&path)
                 .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map(|f| !f["reconciled"].is_null())
+                .unwrap_or(false);
+            matched.then_some(epoch_now)
+        } else {
+            None
         };
-        let epoch: u64 = line
-            .trim_start_matches("epoch ")
-            .split(':')
-            .next()
-            .unwrap_or("")
-            .parse()
-            .context("epoch")?;
-        let ranked = line
-            .split(", ")
-            .find(|p| p.ends_with(" ranked"))
-            .and_then(|p| p.split(' ').next()?.parse().ok())
-            .context("ranked count")?;
-        let stake = num("total stake ").context("total stake")?;
-        let commitment = line
-            .split("commitment ")
-            .nth(1)
-            .and_then(|c| c.split_whitespace().next())
-            .context("commitment")?
-            .to_string();
+        let epoch: u64 = match reuse {
+            Some(e) => {
+                self.log(
+                    id,
+                    format!(
+                        "epoch {e}: using the validator set already matched to real certificates"
+                    ),
+                );
+                e
+            }
+            None => {
+                let out = self
+                    .cmd(
+                        id,
+                        fetch.to_str().unwrap(),
+                        &[
+                            "--rpc",
+                            &rpc,
+                            "--out",
+                            &root,
+                            "validator-set",
+                            "--cluster",
+                            cluster,
+                        ],
+                        Some(&huginn),
+                        &[],
+                        false,
+                    )
+                    .await?;
+                // "epoch 1202: 4366 vote accounts, ... -> file"
+                let line = out
+                    .lines()
+                    .find(|l| l.starts_with("epoch "))
+                    .context("fetch printed no epoch line")?;
+                let epoch: u64 = line
+                    .trim_start_matches("epoch ")
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .parse()
+                    .context("epoch")?;
+                // The set Agave signs with is a snapshot from the start of the previous epoch,
+                // not today's vote accounts. Match ours to real certificates before anything is
+                // deployed with this set's hash.
+                if self.settings.cluster == Cluster::Devnet {
+                    self.reconcile_set(id).await.context(
+                        "the validator set could not be matched to real certificates; not deploying with a set that may be wrong",
+                    )?;
+                }
+                epoch
+            }
+        };
         let info: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             self.sets_dir().join("cluster_info.json"),
         )?)?;
@@ -1256,76 +1268,58 @@ impl Runner {
         let ranked = file["validator_set"]["entries"]
             .as_array()
             .map(|a| a.len() as u64)
-            .unwrap_or(ranked);
+            .context("ranked count")?;
         let stake = file["validator_set"]["total_stake"]
             .as_u64()
-            .unwrap_or(stake);
+            .context("total stake")?;
         let commitment = file["commitment"]
             .as_str()
-            .map(str::to_string)
-            .unwrap_or(commitment);
+            .context("commitment")?
+            .to_string();
         Ok((epoch, ranked, stake, commitment, shred_version))
     }
 
-    /// Fetches a few recently finalized blocks with their certificates, and has ledger-dump
-    /// make the saved set agree with all of them (see `ledger-dump --fix-set`). One block can
-    /// leave the choice open; several settle it.
+    /// Fetches a run of recent blocks and has ledger-dump make the saved set agree with the
+    /// certificates in their footers (see `ledger-dump --fix-set`). Each block takes about a
+    /// minute to repair; every footer certifies a recent block, so a few blocks give several
+    /// certificates, and one certificate alone can leave the choice open.
     async fn reconcile_set(&mut self, id: StepId) -> Result<()> {
-        const BLOCKS: u64 = 4;
+        const BLOCKS: u64 = 6;
         let huginn = self.settings.huginn_dir.clone();
-        let newest = self
+        let from = self
             .rpc("getSlot", r#"[{"commitment":"finalized"}]"#)
             .await?
             .as_u64()
             .context("finalized slot")?
-            .saturating_sub(80);
+            .saturating_sub(40);
         let dir = self.settings.evm_dir.join("proofs/probe");
         let _ = std::fs::remove_dir_all(&dir);
         let dir_s = dir.display().to_string();
+        let (from_s, count_s) = (from.to_string(), BLOCKS.to_string());
         let rpc = self.settings.solana_rpc.clone();
-        let repair = huginn.join("target/release/shred-repair");
-        let slots: Vec<u64> = (0..BLOCKS).map(|i| newest - i * 45).collect();
         self.log(
             id,
             format!(
-                "checking the validator set against the certificates of {BLOCKS} recent blocks (slots {} to {})",
-                slots[slots.len() - 1],
-                slots[0]
+                "checking the validator set against the certificates in {BLOCKS} recent blocks from slot {from} (about a minute per block, once per epoch)"
             ),
         );
-        for slot in &slots {
-            let slot_s = slot.to_string();
-            self.cmd(
-                id,
-                repair.to_str().unwrap(),
-                &["--rpc", &rpc, "fetch", "--slot", &slot_s, "--out", &dir_s],
-                Some(&huginn),
-                &[],
-                true,
-            )
-            .await?;
-        }
+        let repair = huginn.join("target/release/shred-repair");
+        self.cmd(
+            id,
+            repair.to_str().unwrap(),
+            &[
+                "--rpc", &rpc, "footers", "--from", &from_s, "--count", &count_s, "--out", &dir_s,
+            ],
+            Some(&huginn),
+            &[],
+            false,
+        )
+        .await?;
         let sets = self.sets_dir().display().to_string();
-        let list = slots
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let newest_s = newest.to_string();
         self.cmd(
             id,
             self.ledger_dump().to_str().unwrap(),
-            &[
-                "--shreds",
-                &dir_s,
-                "--slot",
-                &newest_s,
-                "--fix-slots",
-                &list,
-                "--sets",
-                &sets,
-                "--fix-set",
-            ],
+            &["--shreds", &dir_s, "--sets", &sets, "--fix-set"],
             Some(&huginn),
             &[],
             false,
