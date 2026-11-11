@@ -1209,12 +1209,9 @@ impl Runner {
         // after the epoch began; the real certificates were signed without them. Check a recent
         // block's certificate and drop them, before anything is deployed with this set's hash.
         if self.settings.cluster == Cluster::Devnet {
-            if let Err(e) = self.reconcile_set(id).await {
-                self.log(
-                    id,
-                    format!("could not check the set against a certificate ({e:#}); using it as fetched"),
-                );
-            }
+            self.reconcile_set(id)
+                .await
+                .context("the validator set could not be matched to real certificates; not deploying with a set that may be wrong")?;
         }
         // "epoch 1202: 4366 vote accounts, 26 with BLS key, 22 ranked, total stake N, commitment HEX -> file"
         let line = out
@@ -1270,35 +1267,51 @@ impl Runner {
         Ok((epoch, ranked, stake, commitment, shred_version))
     }
 
-    /// Fetches a recently finalized block and its certificate, and has ledger-dump make the
-    /// saved set agree with it (see `ledger-dump --fix-set`).
+    /// Fetches a few recently finalized blocks with their certificates, and has ledger-dump
+    /// make the saved set agree with all of them (see `ledger-dump --fix-set`). One block can
+    /// leave the choice open; several settle it.
     async fn reconcile_set(&mut self, id: StepId) -> Result<()> {
+        const BLOCKS: u64 = 4;
         let huginn = self.settings.huginn_dir.clone();
-        let slot = self
+        let newest = self
             .rpc("getSlot", r#"[{"commitment":"finalized"}]"#)
             .await?["result"]
             .as_u64()
             .context("finalized slot")?
-            .saturating_sub(60);
+            .saturating_sub(80);
         let dir = self.settings.evm_dir.join("proofs/probe");
         let _ = std::fs::remove_dir_all(&dir);
-        let (slot_s, dir_s) = (slot.to_string(), dir.display().to_string());
+        let dir_s = dir.display().to_string();
         let rpc = self.settings.solana_rpc.clone();
+        let repair = huginn.join("target/release/shred-repair");
+        let slots: Vec<u64> = (0..BLOCKS).map(|i| newest - i * 45).collect();
         self.log(
             id,
-            format!("checking the set against the certificate of a recent block (slot {slot})"),
+            format!(
+                "checking the validator set against the certificates of {BLOCKS} recent blocks (slots {} to {})",
+                slots[slots.len() - 1],
+                slots[0]
+            ),
         );
-        let repair = huginn.join("target/release/shred-repair");
-        self.cmd(
-            id,
-            repair.to_str().unwrap(),
-            &["--rpc", &rpc, "fetch", "--slot", &slot_s, "--out", &dir_s],
-            Some(&huginn),
-            &[],
-            true,
-        )
-        .await?;
+        for slot in &slots {
+            let slot_s = slot.to_string();
+            self.cmd(
+                id,
+                repair.to_str().unwrap(),
+                &["--rpc", &rpc, "fetch", "--slot", &slot_s, "--out", &dir_s],
+                Some(&huginn),
+                &[],
+                true,
+            )
+            .await?;
+        }
         let sets = self.sets_dir().display().to_string();
+        let list = slots
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let newest_s = newest.to_string();
         self.cmd(
             id,
             self.ledger_dump().to_str().unwrap(),
@@ -1306,7 +1319,9 @@ impl Runner {
                 "--shreds",
                 &dir_s,
                 "--slot",
-                &slot_s,
+                &newest_s,
+                "--fix-slots",
+                &list,
                 "--sets",
                 &sets,
                 "--fix-set",
