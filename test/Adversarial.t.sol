@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {SolanaLightClient} from "../src/SolanaLightClient.sol";
+import {IValidatorSetSource} from "../src/sources/IValidatorSetSource.sol";
 import {SolanaControlled} from "../src/SolanaControlled.sol";
 import {SolanaGreeter} from "../src/examples/SolanaGreeter.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
@@ -29,7 +30,7 @@ contract AdversarialTest is Test {
 
     function setUp() public {
         verifier = new BindingVerifier();
-        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0);
+        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0, false, IValidatorSetSource(address(0)), 0);
         greeter = new SolanaGreeter(client, CONTROLLER);
     }
 
@@ -94,7 +95,7 @@ contract AdversarialTest is Test {
     /// delay (`ValidatorSetProposed`, `pendingSet`) before it counts, so watchers and
     /// consumers have that long to see it coming.
     function test_POC_ownerKeyStillForges_butOnlyAfterAPublicDelay() public {
-        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days);
+        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days, false, IValidatorSetSource(address(0)), 0);
         SolanaGreeter g = new SolanaGreeter(slow, CONTROLLER);
         bytes32 evilSet = keccak256("attacker's own validator set");
         slow.proposeValidatorSet(1, evilSet); // this test contract is the owner

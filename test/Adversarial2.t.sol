@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {SolanaLightClient} from "../src/SolanaLightClient.sol";
+import {IValidatorSetSource} from "../src/sources/IValidatorSetSource.sol";
 import {SolanaControlled} from "../src/SolanaControlled.sol";
 import {SolanaGreeter} from "../src/examples/SolanaGreeter.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
@@ -52,7 +53,7 @@ contract Adversarial2Test is Test {
 
     function setUp() public {
         verifier = new BindingVerifier();
-        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0);
+        client = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 0, false, IValidatorSetSource(address(0)), 0);
         greeter = new SolanaGreeter(client, CONTROLLER);
     }
 
@@ -131,7 +132,7 @@ contract Adversarial2Test is Test {
     /// A block recorded while an attacker's set was in force no longer blocks the real proof
     /// for that slot once the real set is back: records are kept per validator set.
     function test_FIXED_aBadSetEpisodeLeavesNoConflictPoison() public {
-        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days);
+        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days, false, IValidatorSetSource(address(0)), 0);
         SolanaGreeter g = new SolanaGreeter(slow, CONTROLLER);
         bytes32 evilSet = keccak256("attacker set");
 
@@ -171,7 +172,7 @@ contract Adversarial2Test is Test {
     /// The delay cannot be skipped: not by proposing again, not by settling early, not by
     /// proposing an epoch that already has a set.
     function test_HELD_theDelayCannotBeShortened() public {
-        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days);
+        SolanaLightClient slow = new SolanaLightClient(verifier, VKEY, SHRED_VERSION, 432000, 0, SET_0, 1 days, false, IValidatorSetSource(address(0)), 0);
         SolanaGreeter g = new SolanaGreeter(slow, CONTROLLER);
         bytes32 evil = keccak256("evil");
         slow.proposeValidatorSet(0, evil); // epoch 0 already has SET_0
@@ -198,7 +199,7 @@ contract Adversarial2Test is Test {
         vm.startPrank(stranger);
         vm.expectRevert(SolanaLightClient.NotOwner.selector);
         client.proposeValidatorSet(7, keccak256("x"));
-        vm.expectRevert(SolanaLightClient.NotOwner.selector);
+        vm.expectRevert(SolanaLightClient.NotOwnerOrGuardian.selector);
         client.cancelValidatorSet(7);
         vm.expectRevert(SolanaLightClient.NotOwner.selector);
         client.transferOwnership(stranger);

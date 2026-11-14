@@ -3,6 +3,7 @@
 //! what you'd type yourself.
 
 use {
+    crate::safe::{self, redact, EpochSchedule},
     anyhow::{anyhow, bail, ensure, Context, Result},
     huginn_prover::{parse_signature, tx_input_from_block_file, Huginn, Mode},
     std::{
@@ -17,6 +18,23 @@ use {
         sync::mpsc::UnboundedSender,
     },
 };
+
+/// What `script/Deploy.s.sol` reads (and nothing else from `.env`).
+const DEPLOY_VARS: [&str; 13] = [
+    "PRIVATE_KEY",
+    "SP1_VERIFIER",
+    "LOCAL_VERIFIER",
+    "PROGRAM_VKEY",
+    "SHRED_VERSION",
+    "SLOTS_PER_EPOCH",
+    "EPOCH",
+    "VALIDATOR_SET_HASH",
+    "SET_DELAY",
+    "WARMUP",
+    "SET_SOURCE",
+    "REANCHOR_DELAY",
+    "RPC_URL",
+];
 
 /// anvil's first default account: a public test key, only ever used on a local chain.
 const ANVIL_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -277,7 +295,10 @@ impl Settings {
                 .with_context(|| format!("huginn checkout at {}", huginn_dir.display()))?,
             evm_dir,
             solana_rpc: std::env::var("SOLANA_RPC")
-                .unwrap_or_else(|_| Cluster::Local.default_rpc().into()),
+                .ok()
+                .or_else(|| env.get("SOLANA_RPC").cloned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| Cluster::Local.default_rpc().into()),
             cluster: Cluster::Local,
             memo: "hello from solana".into(),
             mode: ProofMode::Mock,
@@ -289,7 +310,11 @@ impl Settings {
     /// Reads this cluster; its public RPC unless `SOLANA_RPC` says otherwise.
     pub fn set_cluster(&mut self, c: Cluster) {
         self.cluster = c;
-        self.solana_rpc = std::env::var("SOLANA_RPC").unwrap_or_else(|_| c.default_rpc().into());
+        self.solana_rpc = std::env::var("SOLANA_RPC")
+            .ok()
+            .or_else(|| self.env.get("SOLANA_RPC").cloned())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| c.default_rpc().into());
     }
 
     /// A link that shows the Solana transaction in a block explorer.
@@ -298,7 +323,7 @@ impl Settings {
             Cluster::Devnet => format!("https://explorer.solana.com/tx/{sig}?cluster=devnet"),
             Cluster::Local => format!(
                 "https://explorer.solana.com/tx/{sig}?cluster=custom&customUrl={}",
-                self.solana_rpc
+                redact::redact_url(&self.solana_rpc)
             ),
         }
     }
@@ -392,10 +417,15 @@ impl Runner {
         self.state.facts.retain(|f| f.step != id.name());
         let _ = self.events.send(Event::Started(id));
         let t = Instant::now();
-        let result = self.step(id).await.map_err(|e| format!("{e:#}"));
+        // Both the success summary and the error text can mention an RPC URL.
+        let result = self
+            .step(id)
+            .await
+            .map(|summary| redact(&summary))
+            .map_err(|e| redact(&format!("{e:#}")));
         let ok = result.is_ok();
         if let Ok(json) = serde_json::to_string_pretty(&self.state) {
-            let _ = std::fs::write(state_file(&self.settings), json + "\n");
+            let _ = std::fs::write(state_file(&self.settings), redact(&json) + "\n");
         }
         let _ = self.events.send(Event::State(Box::new(self.state.clone())));
         let _ = self.events.send(Event::Done(id, result, t.elapsed()));
@@ -415,11 +445,12 @@ impl Runner {
         value: impl Into<String>,
         link: Option<String>,
     ) {
+        // Everything shown, saved or put in the receipt passes through `redact`.
         let f = Fact {
             step: id.name().into(),
-            label: label.into(),
-            value: value.into(),
-            link,
+            label: redact(label),
+            value: redact(&value.into()),
+            link: link.map(|l| redact(&l)),
         };
         self.state
             .facts
@@ -433,7 +464,7 @@ impl Runner {
     }
 
     fn log(&self, id: StepId, line: impl Into<String>) {
-        let _ = self.events.send(Event::Log(id, line.into()));
+        let _ = self.events.send(Event::Log(id, redact(&line.into())));
     }
 
     async fn step(&mut self, id: StepId) -> Result<String> {
@@ -833,6 +864,21 @@ impl Runner {
             .await
             .map(|a| a.trim().to_string())
             .unwrap_or_default();
+        // A keyless URL goes on the command line; a keyed one goes in a private temp config
+        // (deleted right after) so it never shows in `ps`.
+        let cfg_guard;
+        let (url_flag, url_val) = if safe::is_plain_url(&rpc) {
+            ("--url".to_string(), rpc.clone())
+        } else {
+            let cfg = self.cmd(id, "solana", &["config", "get"], None, &[], true).await?;
+            let keypair = cfg
+                .lines()
+                .find_map(|l| l.strip_prefix("Keypair Path:"))
+                .map(|v| v.trim().to_string())
+                .context("solana config get shows no keypair path")?;
+            cfg_guard = safe::SolanaConfig::create(&rpc, &keypair)?;
+            ("--config".to_string(), cfg_guard.path())
+        };
         let out = self
             .cmd(
                 id,
@@ -844,8 +890,8 @@ impl Runner {
                     "--with-memo",
                     &memo,
                     "--allow-unfunded-recipient",
-                    "--url",
-                    &rpc,
+                    &url_flag,
+                    &url_val,
                     "--output",
                     "json",
                 ],
@@ -941,7 +987,9 @@ impl Runner {
                     self.state.slot = Some(slot);
                     self.state.tx_ok = Some(ok);
                     self.fact(id, "slot", commas(slot));
-                    self.fact(id, "epoch", format!("{} (slot / 432,000)", slot / 432_000));
+                    let sched = self.schedule().await?;
+                    let epoch = sched.check_contract_agrees(slot)?;
+                    self.fact(id, "epoch", format!("{epoch} (slot / {})", commas(sched.slots_per_epoch)));
                     self.fact(
                         id,
                         "transaction result",
@@ -1040,18 +1088,19 @@ impl Runner {
         let out_s = out_dir.display().to_string();
         let huginn = self.settings.huginn_dir.clone();
         let certs = self.settings.certs.as_str();
-        let epoch = slot / 432_000;
+        let sched = self.schedule().await?;
+        let epoch = sched.check_contract_agrees(slot)?;
         if let Some(held) = self.state.epoch {
             ensure!(held == epoch, "the light client holds epoch {held}'s validator set, but this transaction is in epoch {epoch}: deploy again");
         }
-        if !self
-            .sets_dir()
-            .join(format!("validator_set_{epoch}.json"))
-            .exists()
-        {
+        // A file that merely exists proves nothing: it must be this cluster's set for this
+        // epoch. (On the local chain its certificates are checked when the block is dumped:
+        // ledger-dump refuses a set that does not verify them.)
+        if !self.set_file_is_for(epoch) {
             self.fetch_set(id).await?;
         }
         let sets_s = self.sets_dir().display().to_string();
+        let spe_s = sched.slots_per_epoch.to_string();
         self.fact(
             id,
             "shreds from",
@@ -1067,6 +1116,7 @@ impl Runner {
                     dump.to_str().unwrap(),
                     &[
                         "--slot", &slot_s, "--certs", certs, "--sets", &sets_s, "--out", &out_s,
+                        "--slots-per-epoch", &spe_s,
                     ],
                     Some(&huginn),
                     &[],
@@ -1096,7 +1146,8 @@ impl Runner {
         let id = StepId::Fetch;
         let evm = self.settings.evm_dir.clone();
         let huginn = self.settings.huginn_dir.clone();
-        let epoch = slot / 432_000;
+        let sched = self.schedule().await?;
+        let epoch = sched.check_contract_agrees(slot)?;
         let sets = self.sets_dir();
         if let Some(held) = self.state.epoch {
             ensure!(
@@ -1104,12 +1155,14 @@ impl Runner {
                 "the light client holds epoch {held}'s validator set, but this transaction is in epoch {epoch}: propose epoch {epoch}'s set (script/ProposeValidatorSet.s.sol), wait SET_DELAY, then run again"
             );
         }
-        if !sets.join(format!("validator_set_{epoch}.json")).exists() {
+        // Trusted only if `check-set` passed for exactly this file; otherwise fetch it again
+        // and check it (fail closed).
+        if !safe::set_is_verified(&sets, epoch) {
             self.fetch_set(id).await?;
         }
         ensure!(
-            sets.join(format!("validator_set_{epoch}.json")).exists(),
-            "no validator set for epoch {epoch}: public RPC serves only the current epoch's stakes, and this transaction's epoch has ended"
+            safe::set_is_verified(&sets, epoch),
+            "no verified validator set for epoch {epoch}: public RPC serves only the current epoch's stakes, and this transaction's epoch has ended"
         );
         let shreds_dir = evm.join("proofs/shreds");
         let _ = std::fs::remove_dir_all(&shreds_dir);
@@ -1143,11 +1196,13 @@ impl Runner {
         let dump = self.ledger_dump();
         let sets_s = sets.display().to_string();
         let out_s = evm.join("proofs").display().to_string();
+        let spe_s = sched.slots_per_epoch.to_string();
         self.cmd(
             id,
             dump.to_str().unwrap(),
             &[
                 "--shreds", &dir_s, "--slot", &slot_s, "--sets", &sets_s, "--out", &out_s,
+                "--slots-per-epoch", &spe_s,
             ],
             Some(&huginn),
             &[],
@@ -1187,81 +1242,41 @@ impl Runner {
             false,
         )
         .await?;
-        // A set already matched to real certificates for this epoch stays good for the epoch:
-        // reuse it instead of repeating the slow check.
-        let reuse = if self.settings.cluster == Cluster::Devnet {
-            let epoch_now = self.rpc("getEpochInfo", "[]").await?["epoch"]
-                .as_u64()
-                .context("epoch")?;
-            let path = self
-                .sets_dir()
-                .join(format!("validator_set_{epoch_now}.json"));
-            let matched = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .map(|f| !f["reconciled"].is_null())
-                .unwrap_or(false);
-            matched.then_some(epoch_now)
-        } else {
-            None
-        };
-        let epoch: u64 = match reuse {
-            Some(e) => {
-                self.log(
-                    id,
-                    format!(
-                        "epoch {e}: using the validator set already matched to real certificates"
-                    ),
-                );
-                e
-            }
-            None => {
-                let out = self
-                    .cmd(
-                        id,
-                        fetch.to_str().unwrap(),
-                        &[
-                            "--rpc",
-                            &rpc,
-                            "--out",
-                            &root,
-                            "validator-set",
-                            "--cluster",
-                            cluster,
-                        ],
-                        Some(&huginn),
-                        &[],
-                        false,
-                    )
-                    .await?;
-                // "epoch 1202: 4366 vote accounts, ... -> file"
-                let line = out
-                    .lines()
-                    .find(|l| l.starts_with("epoch "))
-                    .context("fetch printed no epoch line")?;
-                let epoch: u64 = line
-                    .trim_start_matches("epoch ")
-                    .split(':')
-                    .next()
-                    .unwrap_or("")
-                    .parse()
-                    .context("epoch")?;
-                // The set Agave signs with is a snapshot from the start of the previous epoch,
-                // not today's vote accounts. Match ours to real certificates before anything is
-                // deployed with this set's hash.
-                if self.settings.cluster == Cluster::Devnet {
-                    self.reconcile_set(id).await.context(
-                        "the validator set could not be matched to real certificates; not deploying with a set that may be wrong",
-                    )?;
-                }
-                epoch
-            }
-        };
+        // Always fetch the live set: a file left from before is never reused on trust.
+        let out = self
+            .cmd(
+                id,
+                fetch.to_str().unwrap(),
+                &["--rpc", &rpc, "--out", &root, "validator-set", "--cluster", cluster],
+                Some(&huginn),
+                &[],
+                false,
+            )
+            .await?;
+        // "epoch 1202: 4366 vote accounts, ... -> file"
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("epoch "))
+            .context("fetch printed no epoch line")?;
+        let epoch: u64 = line
+            .trim_start_matches("epoch ")
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .parse()
+            .context("epoch")?;
+        // Agave signs with a snapshot of the epoch's members, and RPC only shows live data,
+        // so the fetched set is a candidate, not a fact. `check-set` verifies it against real
+        // certificates and never edits it. If it does not verify, stop: nothing is deployed.
+        if self.settings.cluster == Cluster::Devnet {
+            self.check_set(id).await.context(
+                "the fetched validator set does not verify real certificates; not deploying with a set that may be wrong",
+            )?;
+        }
         let info: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             self.sets_dir().join("cluster_info.json"),
         )?)?;
         let shred_version = info["shred_version"].as_u64().context("shred_version")?;
-        // The set file is the truth: reconciling may have changed it since `fetch` printed.
         let file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             self.sets_dir().join(format!("validator_set_{epoch}.json")),
         )?)?;
@@ -1279,12 +1294,27 @@ impl Runner {
         Ok((epoch, ranked, stake, commitment, shred_version))
     }
 
-    /// Fetches a run of recent blocks and has ledger-dump make the saved set agree with the
-    /// certificates in their footers (see `ledger-dump --fix-set`). Each block takes about a
-    /// minute to repair; every footer certifies a recent block, so a few blocks give several
-    /// certificates, and one certificate alone can leave the choice open.
-    async fn reconcile_set(&mut self, id: StepId) -> Result<()> {
+    /// Whether the saved set file is this cluster's set for `epoch` (not merely a file that
+    /// exists under that name).
+    fn set_file_is_for(&self, epoch: u64) -> bool {
+        let dir = self.sets_dir();
+        let read = |n: String| -> Option<serde_json::Value> {
+            serde_json::from_str(&std::fs::read_to_string(dir.join(n)).ok()?).ok()
+        };
+        read(format!("validator_set_{epoch}.json")).is_some_and(|f| {
+            f["validator_set"]["epoch"].as_u64() == Some(epoch)
+                && f["cluster"].as_str() == Some(self.settings.cluster.as_str())
+        })
+    }
+
+    /// Fetches a run of recent blocks and has `ledger-dump check-set` verify the saved
+    /// validator set against the certificates in their footers. It writes
+    /// `check_set_<epoch>.json` and fails if any certificate does not verify; it never edits
+    /// the set. Each block takes about a minute to fetch; every footer certifies a recent
+    /// block, so a few blocks give several certificates.
+    async fn check_set(&mut self, id: StepId) -> Result<()> {
         const BLOCKS: u64 = 6;
+        const MIN_CERTS: &str = "3";
         let huginn = self.settings.huginn_dir.clone();
         let from = self
             .rpc("getSlot", r#"[{"commitment":"finalized"}]"#)
@@ -1292,6 +1322,7 @@ impl Runner {
             .as_u64()
             .context("finalized slot")?
             .saturating_sub(40);
+        let sched = self.schedule().await?;
         let dir = self.settings.evm_dir.join("proofs/probe");
         let _ = std::fs::remove_dir_all(&dir);
         let dir_s = dir.display().to_string();
@@ -1300,7 +1331,7 @@ impl Runner {
         self.log(
             id,
             format!(
-                "checking the validator set against the certificates in {BLOCKS} recent blocks from slot {from} (about a minute per block, once per epoch)"
+                "checking the validator set against the certificates in {BLOCKS} recent blocks from slot {from} (about a minute per block)"
             ),
         );
         let repair = huginn.join("target/release/shred-repair");
@@ -1316,15 +1347,23 @@ impl Runner {
         )
         .await?;
         let sets = self.sets_dir().display().to_string();
-        self.cmd(
-            id,
-            self.ledger_dump().to_str().unwrap(),
-            &["--shreds", &dir_s, "--sets", &sets, "--fix-set"],
-            Some(&huginn),
-            &[],
-            false,
-        )
-        .await?;
+        let spe_s = sched.slots_per_epoch.to_string();
+        let out = self
+            .cmd(
+                id,
+                self.ledger_dump().to_str().unwrap(),
+                &[
+                    "--shreds", &dir_s, "--sets", &sets, "--slots-per-epoch", &spe_s,
+                    "check-set", "--min-certs", MIN_CERTS,
+                ],
+                Some(&huginn),
+                &[],
+                false,
+            )
+            .await?;
+        if let Some(l) = out.lines().find(|l| l.starts_with("PASS")) {
+            self.fact(id, "validator set check", l.to_string());
+        }
         Ok(())
     }
 
@@ -1448,15 +1487,15 @@ impl Runner {
             self.chain(),
             mode.as_str()
         );
-        // SP1 picks its prover from the environment.
-        std::env::set_var(
-            "SP1_PROVER",
-            if mode == ProofMode::Mock {
-                "mock"
-            } else {
-                "cpu"
-            },
-        );
+        // SP1 picks its prover from the environment. Mock proofs use the mock prover; a real
+        // proof follows the user's own SP1_PROVER (cpu by default; cuda or network if they
+        // chose it). NETWORK_PRIVATE_KEY is read by sp1-sdk from the environment, never here.
+        let prover = safe::sp1_prover(mode != ProofMode::Mock, std::env::var("SP1_PROVER").ok().as_deref())?;
+        if prover == "network" {
+            network_ready()?;
+        }
+        std::env::set_var("SP1_PROVER", &prover);
+        self.fact(id, "prover", prover);
         self.log(
             id,
             format!(
@@ -1725,35 +1764,58 @@ impl Runner {
         Ok(out.trim().parse()?)
     }
 
-    /// The environment forge scripts read. The key travels here, never on a command line.
-    async fn forge_env(&self, id: StepId) -> Result<Vec<(String, String)>> {
+    /// The environment one forge script reads: only the variables in `allow`, taken from
+    /// `.env`, plus the key and RPC URL the run decided on. The key travels here, never on a
+    /// command line, and a script never sees `.env` variables it doesn't use.
+    async fn forge_env(&self, id: StepId, allow: &[&str]) -> Result<Vec<(String, String)>> {
         let mut env: Vec<(String, String)> = self
             .settings
             .env
             .iter()
+            .filter(|(k, v)| allow.contains(&k.as_str()) && !v.is_empty())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let mut put = |k: &str, v: String| {
+            if allow.contains(&k) {
+                env.retain(|(x, _)| x != k);
+                env.push((k.to_string(), v));
+            }
+        };
         let chain = self.chain_id(id).await?;
-        env.push(("PRIVATE_KEY".into(), self.settings.private_key(chain)?));
-        env.push(("RPC_URL".into(), self.settings.evm_rpc()));
+        put("PRIVATE_KEY", self.settings.private_key(chain)?);
+        put("RPC_URL", self.settings.evm_rpc());
+        let sched = self.schedule().await?;
+        put("SLOTS_PER_EPOCH", sched.slots_per_epoch.to_string());
+        put("WARMUP", sched.warmup.to_string());
         if let Some(vkey) = &self.state.program_vkey {
-            env.push(("PROGRAM_VKEY".into(), vkey.clone()));
+            put("PROGRAM_VKEY", vkey.clone());
         }
         if let Some(client) = &self.state.client {
-            env.push(("HUGINN_CLIENT".into(), client.clone()));
+            put("HUGINN_CLIENT", client.clone());
         }
         // Devnet: the light client starts from the cluster's current epoch.
         if let (Some(epoch), Some(hash)) = (self.state.epoch, &self.state.set_hash) {
-            env.push(("EPOCH".into(), epoch.to_string()));
-            env.push(("VALIDATOR_SET_HASH".into(), hash.clone()));
+            put("EPOCH", epoch.to_string());
+            put("VALIDATOR_SET_HASH", hash.clone());
         }
-        env.push(("PROOF_FILE".into(), "proofs/proof.json".into()));
+        put("PROOF_FILE", "proofs/proof.json".into());
         Ok(env)
     }
 
     async fn deploy(&mut self) -> Result<String> {
         let id = StepId::Deploy;
         let chain = self.chain_id(id).await?;
+        // A proposed set must count well before its epoch ends (W5): check SET_DELAY against
+        // the cluster's real epoch length before spending anything.
+        let delay: u64 = match self.settings.env.iter().find(|(k, _)| k.as_str() == "SET_DELAY").map(|(_, v)| v.trim()) {
+            Some(v) if !v.is_empty() => v.parse().context("SET_DELAY is not a number of seconds")?,
+            _ if chain == ANVIL_CHAIN_ID => 0,
+            _ => safe::DEFAULT_SET_DELAY_SECS,
+        };
+        let sched = self.schedule().await?;
+        let ms = safe::ms_per_slot(&self.rpc("getRecentPerformanceSamples", "[10]").await?)?;
+        let epoch_h = safe::check_set_delay(delay, sched.slots_per_epoch, ms)?;
+        self.fact(id, "validator set delay", format!("{delay} s (epoch ≈ {epoch_h:.1} h at {ms:.0} ms/slot)"));
         // The light client starts from the cluster's current epoch and its validator set, read
         // from the live chain (not from .env, not from the repo's fixtures).
         self.log(
@@ -1781,12 +1843,20 @@ impl Runner {
             id,
             "huginn.program_vkey()  (the SP1 program's fingerprint; no proof needed)",
         );
-        std::env::set_var("SP1_PROVER", "mock");
+        // The program key needs no proof. Respect the user's SP1_PROVER; only when it is
+        // unset use the mock prover (the cheapest way to read the key).
+        if std::env::var("SP1_PROVER").map_or(true, |v| v.trim().is_empty()) {
+            std::env::set_var("SP1_PROVER", "mock");
+        } else if std::env::var("SP1_PROVER").is_ok_and(|v| v.trim() == "network") {
+            network_ready()?; // sp1-sdk would panic without the feature
+        }
         let vkey = Huginn::from_env().await.program_vkey().await?;
         self.log(id, format!("  {vkey}"));
         self.fact(id, "program key", vkey.clone());
         self.state.program_vkey = Some(vkey);
-        let mut env = self.forge_env(id).await?;
+        let mut env = self
+            .forge_env(id, &DEPLOY_VARS)
+            .await?;
         if let Some(sv) = shred_version {
             env.retain(|(k, _)| k != "SHRED_VERSION");
             env.push(("SHRED_VERSION".into(), sv.to_string()));
@@ -1882,7 +1952,7 @@ impl Runner {
         let id = StepId::Submit;
         ensure!(self.state.client.is_some(), "deploy first");
         ensure!(self.state.proof_file.is_some(), "prove first");
-        let env = self.forge_env(id).await?;
+        let env = self.forge_env(id, &["PRIVATE_KEY", "HUGINN_CLIENT", "PROOF_FILE"]).await?;
         let rpc = self.settings.evm_rpc();
         let dir = self.settings.evm_dir.clone();
         let out = self
@@ -2112,7 +2182,7 @@ impl Runner {
             "controller as bytes32",
             format!("0x{}", hex::encode(&key)),
         );
-        let mut env = self.forge_env(id).await?;
+        let mut env = self.forge_env(id, &["PRIVATE_KEY", "HUGINN_CLIENT"]).await?;
         env.push((
             "SOLANA_CONTROLLER".into(),
             format!("0x{}", hex::encode(&key)),
@@ -2171,7 +2241,7 @@ impl Runner {
         let file = self.state.proof_file.clone().context("prove first")?;
         let rpc = self.settings.evm_rpc();
         let (pv, proof) = self.proof_bytes(id, &client, &file).await?;
-        let mut env = self.forge_env(id).await?;
+        let mut env = self.forge_env(id, &["PRIVATE_KEY"]).await?;
         env.push(("GREETER".into(), greeter.clone()));
         env.push(("PUBLIC_VALUES".into(), format!("0x{}", hex::encode(&pv))));
         env.push(("PROOF".into(), format!("0x{}", hex::encode(&proof))));
@@ -2304,31 +2374,20 @@ impl Runner {
         self.settings.huginn_dir.join("target/release/ledger-dump")
     }
 
+    /// One Solana JSON-RPC call, in this process (no `curl`: its argument list would put
+    /// the URL, and any API key in it, where `ps` can see it).
     async fn rpc(&self, method: &str, params: &str) -> Result<serde_json::Value> {
-        let body = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{params}}}"#);
-        let out = Command::new("curl")
-            .args([
-                "-s",
-                "--max-time",
-                "5",
-                &self.settings.solana_rpc,
-                "-H",
-                "content-type: application/json",
-                "-d",
-                &body,
-            ])
-            .output()
-            .await?;
-        ensure!(
-            out.status.success(),
-            "RPC {} unreachable",
-            self.settings.solana_rpc
-        );
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-        if let Some(e) = v.get("error") {
-            bail!("RPC error: {e}");
-        }
-        Ok(v["result"].clone())
+        let url = self.settings.solana_rpc.clone();
+        let method = method.to_string();
+        let params: serde_json::Value = serde_json::from_str(params).context("rpc params")?;
+        tokio::task::spawn_blocking(move || safe::http_rpc(&url, &method, params, 5))
+            .await
+            .map_err(|e| anyhow!("rpc task: {e}"))?
+    }
+
+    /// The cluster's epoch schedule, from `getEpochSchedule` (never a hard-coded 432,000).
+    async fn schedule(&self) -> Result<EpochSchedule> {
+        EpochSchedule::from_rpc(&self.rpc("getEpochSchedule", "[]").await?)
     }
 
     /// Runs a command, streams its output into the step's log, returns stdout. `quiet`
@@ -2343,13 +2402,14 @@ impl Runner {
         quiet: bool,
     ) -> Result<String> {
         if !quiet {
-            let shown: Vec<String> = args
+            let (shown_args, _) = safe::split_rpc_args(args);
+            let shown: Vec<String> = shown_args
                 .iter()
                 .map(|a| {
                     if a.chars().count() > 42 {
                         format!("{}…", a.chars().take(40).collect::<String>())
                     } else {
-                        a.to_string()
+                        a.clone()
                     }
                 })
                 .collect();
@@ -2359,8 +2419,15 @@ impl Runner {
                 .unwrap_or(program.into());
             self.log(id, format!("$ {name} {}", shown.join(" ")));
         }
+        // URLs never go on a command line (`ps` shows them): `--rpc-url`/`--rpc` become
+        // ETH_RPC_URL / SOLANA_RPC. The child gets a clean environment plus only what the
+        // step passes, so unrelated secrets (other keys in this shell) don't leak into it.
+        let (args, rpc_env) = safe::split_rpc_args(args);
         let mut c = Command::new(program);
-        c.args(args)
+        c.args(&args)
+            .env_clear()
+            .envs(safe::base_env())
+            .envs(rpc_env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -2671,6 +2738,91 @@ impl Runner {
             ));
         }
         md.push_str("```\n");
-        let _ = std::fs::write(self.settings.evm_dir.join("proofs/receipt.md"), md);
+        let _ = std::fs::write(self.settings.evm_dir.join("proofs/receipt.md"), redact(&md));
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real public values of the one-validator local proof (also used by the Solidity tests).
+    fn real_pv() -> Vec<u8> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/fixtures/real-1-validator-fast.compressed.json");
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        hex::decode(v["public_values"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn decode_pv_reads_every_field_of_the_real_output() {
+        let pv = decode_pv(&real_pv()).unwrap();
+        assert_eq!(pv.slot, 46718);
+        assert_eq!(pv.shred_version, 28090);
+        assert_eq!(hex::encode(pv.set_hash), "b1f25236519c10b064498b6507ed0b87b88ad4df728a0a348e9434769d7d3c11");
+        assert!(!pv.slow);
+        assert_eq!(pv.signed, pv.total);
+        assert_eq!(pv.tx.len(), 275);
+    }
+
+    #[test]
+    fn decode_pv_refuses_bad_framing() {
+        let good = real_pv();
+        assert!(decode_pv(&good[..105]).is_err(), "too short");
+        let mut v2 = good.clone();
+        v2[0] = 2;
+        assert!(decode_pv(&v2).is_err(), "unknown version");
+        let mut extra = good.clone();
+        extra.push(0);
+        assert!(decode_pv(&extra).is_err(), "trailing byte");
+        let mut short_tx = good;
+        short_tx.pop();
+        assert!(decode_pv(&short_tx).is_err(), "transaction shorter than its length field");
+    }
+
+    #[test]
+    fn signer_ranks_reads_the_base2_bitmap() {
+        // 0x00, u16-LE bit count, payload (bit i = rank i, least significant bit first).
+        assert_eq!(signer_ranks(&[0, 5, 0, 0b0001_0101]), vec![0, 2, 4]);
+        assert_eq!(signer_ranks(&[0, 10, 0, 0b0000_0001, 0b0000_0010]), vec![0, 9]);
+        // Bits beyond the stated count are ignored; a missing payload byte means "no signer".
+        assert_eq!(signer_ranks(&[0, 3, 0, 0b1111_1111]), vec![0, 1, 2]);
+        assert_eq!(signer_ranks(&[0, 16, 0, 0b1]), vec![0]);
+        // Not the base2 encoding: no ranks, never a guess.
+        assert!(signer_ranks(&[1, 3, 0, 0b111]).is_empty());
+        assert!(signer_ranks(&[]).is_empty());
+        // The 13-cert devnet bitmap from the fixtures: 0x0014 = 20 bits, 3 payload bytes.
+        let bm = hex::decode("0014002e0008").unwrap();
+        assert_eq!(bm[0], 0);
+        assert_eq!(signer_ranks(&bm), vec![1, 2, 3, 5, 19]);
+    }
+
+    #[test]
+    fn redaction_applies_to_what_a_fact_would_show() {
+        let shown = redact("RPC https://devnet.helius-rpc.com/?api-key=ABCDEF1234 is up");
+        assert!(!shown.contains("ABCDEF1234") && shown.contains("devnet.helius-rpc.com"));
+    }
+
+    #[test]
+    fn explorer_link_for_local_chain_hides_rpc_secrets() {
+        let mut s = Settings::load(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."), Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../huginn"))).unwrap();
+        s.cluster = Cluster::Local;
+        s.solana_rpc = "http://10.0.0.5:8899/?api-key=KEYKEYKEY".into();
+        let link = s.solana_tx_link("SIG");
+        assert!(!link.contains("KEYKEYKEY"), "{link}");
+        assert!(link.contains("10.0.0.5:8899"));
+    }
+}
+
+/// `SP1_PROVER=network` needs this binary built with the prover-network client and the
+/// account key in the environment. Checked up front: sp1-sdk panics without the feature.
+fn network_ready() -> Result<()> {
+    ensure!(
+        cfg!(feature = "network"),
+        "SP1_PROVER=network needs the prover network client: rebuild with `cargo build --release --features network`"
+    );
+    ensure!(
+        std::env::var("NETWORK_PRIVATE_KEY").is_ok_and(|k| !k.trim().is_empty()),
+        "SP1_PROVER=network needs NETWORK_PRIVATE_KEY exported in this shell (your Succinct prover-network key; never put it in .env)"
+    );
+    Ok(())
 }

@@ -20,6 +20,15 @@ bs58 = "0.5"
 anyhow = "1"
 dotenvy = "0.15"
 ratatui = "0.30"
+# Shared with the huginn binaries: RPC URLs can carry API keys, so only the host is shown.
+redact = { path = "../../huginn/crates/redact" }
+# In-process JSON-RPC (a `curl` child process would put the URL on the command line).
+ureq = { version = "2", features = ["json"] }
+
+[features]
+# Prove on Succinct's prover network: build with `--features network`, then run with
+# `SP1_PROVER=network` and `NETWORK_PRIVATE_KEY` exported in the shell (never in .env).
+network = ["huginn-prover/network"]
 
 # Required by huginn: the SP1-accelerated curve code it was proven equal to Agave with.
 [patch.crates-io]

@@ -610,7 +610,7 @@ impl App {
                 self.settings.certs.as_str()
             )),
             Span::styled("   evm ", Style::new().fg(DIM)),
-            Span::raw(self.settings.evm_rpc()),
+            Span::raw(redact::redact_url(&self.settings.evm_rpc())),
         ]);
         f.render_widget(Paragraph::new(line), area);
     }

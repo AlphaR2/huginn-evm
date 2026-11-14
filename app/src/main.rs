@@ -8,6 +8,7 @@
 //! Run it from this repo (it reads .env and the forge scripts here). huginn is expected
 //! next to it (../huginn), or pass --huginn.
 
+mod safe;
 mod steps;
 mod tui;
 
@@ -50,7 +51,14 @@ enum Command {
     Vkey,
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("error: {}", safe::redact(&format!("{e:#}")));
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
     steps::extend_path();
     let cli = Cli::parse();
     let evm_dir = std::env::current_dir()?;

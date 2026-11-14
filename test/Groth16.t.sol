@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {SP1Verifier} from "../src/sp1/SP1VerifierGroth16.sol";
 import {SolanaLightClient} from "../src/SolanaLightClient.sol";
+import {IValidatorSetSource} from "../src/sources/IValidatorSetSource.sol";
 import {HuginnOutput} from "../src/HuginnOutput.sol";
 
 /// 4.5 / 7.2: a real Groth16 proof from huginn, checked by SP1's real Solidity verifier
@@ -43,7 +44,7 @@ contract Groth16Test is Test {
     }
 
     function test_lightClientAcceptsRealProof() public withFixture {
-        SolanaLightClient client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, 432000, 0, SET_0, 0);
+        SolanaLightClient client = new SolanaLightClient(verifier, vkey, SHRED_VERSION, 432000, 0, SET_0, 0, false, IValidatorSetSource(address(0)), 0);
         uint256 before = gasleft();
         HuginnOutput.Output memory out = client.submit(pv, proof);
         emit log_named_uint("SolanaLightClient.submit gas, real Groth16", before - gasleft());

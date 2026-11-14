@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Script, console} from "forge-std/Script.sol";
 import {ISP1Verifier} from "../src/ISP1Verifier.sol";
 import {SolanaLightClient} from "../src/SolanaLightClient.sol";
+import {IValidatorSetSource} from "../src/sources/IValidatorSetSource.sol";
 import {BindingVerifier} from "../src/mocks/BindingVerifier.sol";
 import {SP1Verifier} from "../src/sp1/SP1VerifierGroth16.sol";
 
@@ -33,15 +34,20 @@ contract Deploy is Script {
             uint64(vm.envUint("SLOTS_PER_EPOCH")),
             uint64(vm.envUint("EPOCH")),
             vm.envBytes32("VALIDATOR_SET_HASH"),
-            setDelay()
+            setDelay(),
+            vm.envOr("WARMUP", false),
+            // No proven handover yet: SET_SOURCE stays unset (trusted-owner mode).
+            IValidatorSetSource(vm.envOr("SET_SOURCE", address(0))),
+            uint64(vm.envOr("REANCHOR_DELAY", uint256(7 days)))
         );
         vm.stopBroadcast();
         console.log("SolanaLightClient:", address(client));
         console.log("validator set delay (s):", client.setDelay());
     }
 
-    /// SET_DELAY from .env. Unset: none on anvil, one day anywhere else.
+    /// SET_DELAY from .env. Unset: none on anvil, two hours anywhere else (an epoch is ~1 day;
+    /// the app refuses a delay above 1/8 of the measured epoch).
     function setDelay() internal view returns (uint64) {
-        return uint64(vm.envOr("SET_DELAY", block.chainid == 31337 ? uint256(0) : uint256(1 days)));
+        return uint64(vm.envOr("SET_DELAY", block.chainid == 31337 ? uint256(0) : uint256(2 hours)));
     }
 }
