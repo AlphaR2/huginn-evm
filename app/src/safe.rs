@@ -185,13 +185,30 @@ impl SolanaConfig {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let path = std::env::temp_dir().join(format!("huginn-solana-{}-{:x}.yml", std::process::id(), nonce()));
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-        // JSON strings are valid YAML, and quote the values safely.
-        writeln!(f, "json_rpc_url: {}\nkeypair_path: {}\ncommitment: confirmed", json!(url), json!(keypair_path))?;
+        // JSON strings are valid YAML, and quote the values safely. The CLI needs every field
+        // its config has: with `websocket_url` missing it can't parse the file and silently
+        // uses its defaults (mainnet), seen 14 Nov 2026. An empty websocket_url means "derive
+        // it from json_rpc_url". Callers still check the result with `rpc_url_matches`.
+        writeln!(
+            f,
+            "json_rpc_url: {}\nwebsocket_url: \"\"\nkeypair_path: {}\naddress_labels: {{}}\ncommitment: confirmed",
+            json!(url),
+            json!(keypair_path)
+        )?;
         Ok(SolanaConfig(path))
     }
     pub fn path(&self) -> String {
         self.0.display().to_string()
     }
+}
+
+/// Whether `solana config get --config <file>` output shows exactly this RPC URL, i.e. the
+/// CLI really read our file instead of falling back to its defaults.
+pub fn rpc_url_matches(config_get_output: &str, url: &str) -> bool {
+    config_get_output
+        .lines()
+        .find_map(|l| l.strip_prefix("RPC URL:"))
+        .is_some_and(|v| v.trim() == url)
 }
 
 impl Drop for SolanaConfig {
@@ -272,8 +289,18 @@ mod tests {
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("json_rpc_url: \"https://x.io/?api-key=K\""), "{text}");
+        assert!(text.contains("websocket_url: \"\""), "{text}");
         drop(c);
         assert!(!p.exists(), "config file must be removed");
+    }
+
+    #[test]
+    fn rpc_url_check_catches_a_fallback() {
+        let ok = "Config File: /tmp/c.yml\nRPC URL: https://d.io/?api-key=K \nKeypair Path: /k\n";
+        assert!(rpc_url_matches(ok, "https://d.io/?api-key=K"));
+        let fell_back = "RPC URL: https://api.mainnet-beta.solana.com \n";
+        assert!(!rpc_url_matches(fell_back, "https://d.io/?api-key=K"));
+        assert!(!rpc_url_matches("", "https://d.io/"));
     }
 
     #[test]

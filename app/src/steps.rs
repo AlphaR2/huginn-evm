@@ -892,6 +892,15 @@ impl Runner {
                 .map(|v| v.trim().to_string())
                 .context("solana config get shows no keypair path")?;
             cfg_guard = safe::SolanaConfig::create(&rpc, &keypair)?;
+            // The CLI falls back to its defaults (mainnet) on a config it can't parse, without
+            // an error. Check it read ours before sending anything. Quiet: the output has the URL.
+            let check = self
+                .cmd(id, "solana", &["config", "get", "--config", &cfg_guard.path()], None, &[], true)
+                .await?;
+            ensure!(
+                safe::rpc_url_matches(&check, &rpc),
+                "the solana CLI did not read the temporary config (it would use another cluster); not sending"
+            );
             ("--config".to_string(), cfg_guard.path())
         };
         let out = self
