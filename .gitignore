@@ -5,7 +5,16 @@ lib/
 app/target/
 proofs/*
 !proofs/.gitkeep
+# Earlier runs set aside (`mv proofs proofs.old-<date>`)
+proofs.old*/
+# Secrets: every env file except the committed template, keys and keypairs.
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+id.json
+*keypair*.json
 
 # Personal notes and generated results
 notes/

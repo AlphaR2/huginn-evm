@@ -700,6 +700,21 @@ impl Runner {
                                             .find_map(|l| l.trim().strip_prefix(k))
                                             .map(|v| v.trim().to_string())
                                     };
+                                    // forge can silently fall back to an empty in-memory
+                                    // chain (balance 0); only trust a script that ran on the
+                                    // chain `cast` just reported.
+                                    let script_chain: Option<u64> =
+                                        get("chain id:").and_then(|v| v.parse().ok());
+                                    if script_chain != Some(chain) {
+                                        self.log(
+                                            id,
+                                            format!(
+                                                "✗ forge script ran on chain {}, not {chain}: its balance would be wrong",
+                                                script_chain.map_or("?".into(), |c| c.to_string())
+                                            ),
+                                        );
+                                        missing.push("forge RPC");
+                                    }
                                     let who = get("deployer:").unwrap_or_default();
                                     let wei: u128 = get("balance wei:")
                                         .and_then(|v| v.parse().ok())

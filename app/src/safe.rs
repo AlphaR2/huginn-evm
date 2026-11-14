@@ -26,20 +26,25 @@ pub fn is_plain_url(url: &str) -> bool {
 }
 
 /// Pulls `--rpc-url <url>` and `--rpc <url>` out of a command's arguments. The URL moves to
-/// an environment variable instead (`ETH_RPC_URL` for cast/forge, `SOLANA_RPC` for the huginn
-/// tools), because command-line arguments are visible to every user through `ps`.
+/// environment variables instead, because command-line arguments are visible to every user
+/// through `ps`:
+///   - `--rpc-url` sets `ETH_RPC_URL` (read by `cast`) and `FOUNDRY_ETH_RPC_URL` (Foundry's
+///     config value, read by `forge script`). `forge script` ignores `ETH_RPC_URL`: with only
+///     that set it runs on an empty in-memory chain (id 31337, every balance 0) instead of
+///     the real one, without any error (seen 14 Nov 2026).
+///   - `--rpc` sets `SOLANA_RPC` (read by the huginn tools).
 pub fn split_rpc_args(args: &[&str]) -> (Vec<String>, Vec<(String, String)>) {
     let (mut kept, mut env) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < args.len() {
-        let var = match args[i] {
-            "--rpc-url" => Some("ETH_RPC_URL"),
-            "--rpc" => Some("SOLANA_RPC"),
-            _ => None,
+        let vars: &[&str] = match args[i] {
+            "--rpc-url" => &["ETH_RPC_URL", "FOUNDRY_ETH_RPC_URL"],
+            "--rpc" => &["SOLANA_RPC"],
+            _ => &[],
         };
-        match (var, args.get(i + 1)) {
-            (Some(v), Some(url)) => {
-                env.push((v.to_string(), url.to_string()));
+        match (vars.is_empty(), args.get(i + 1)) {
+            (false, Some(url)) => {
+                env.extend(vars.iter().map(|v| (v.to_string(), url.to_string())));
                 i += 2;
             }
             _ => {
@@ -247,7 +252,11 @@ mod tests {
     fn rpc_urls_move_from_arguments_to_environment() {
         let (args, env) = split_rpc_args(&["call", "0xabc", "f()", "--rpc-url", "https://e.io/KEY"]);
         assert_eq!(args, ["call", "0xabc", "f()"]);
-        assert_eq!(env, [("ETH_RPC_URL".to_string(), "https://e.io/KEY".to_string())]);
+        let url = "https://e.io/KEY".to_string();
+        assert_eq!(
+            env,
+            [("ETH_RPC_URL".to_string(), url.clone()), ("FOUNDRY_ETH_RPC_URL".to_string(), url)]
+        );
         let (args, env) = split_rpc_args(&["--rpc", "https://s.io/K", "--out", "x", "fetch"]);
         assert_eq!(args, ["--out", "x", "fetch"]);
         assert_eq!(env[0].0, "SOLANA_RPC");
